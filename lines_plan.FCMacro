@@ -1,0 +1,277 @@
+# vim: set ft=python :
+
+import math
+import time
+
+import Draft
+import OpenSCADUtils
+import FreeCADGui
+import TechDraw
+import Part
+
+class Slice_Base(list):
+  intersection_count: int 
+  plane = App.Vector(0, 0, 0)
+
+  def __init__(self, hull_body, intersection_count = 12):
+    self.hull_body = hull_body
+    self.intersection_count = intersection_count
+
+    self.slice()
+
+  def slice(self):
+    bound_box = self.hull_body.Shape.BoundBox
+
+    if self.plane == App.Vector(1, 0, 0):
+      slice_range = bound_box.XLength
+      slice_start = bound_box.XMin
+      slice_end = 1
+    elif self.plane == App.Vector(0, 1, 0):
+      slice_range = bound_box.YLength
+      slice_start = bound_box.YMin
+      slice_end = bound_box.YMax
+    elif self.plane == App.Vector(0, 0, 1):
+      slice_range = bound_box.ZLength
+      slice_start = bound_box.ZMin
+      slice_end = bound_box.ZMax
+
+    slice_width = slice_range / (self.intersection_count + 1)
+
+    if self.plane == App.Vector(0, 1, 0):
+      slice_start = bound_box.YMin + slice_width / 4
+      slice_end = bound_box.YMax - slice_width / 4
+      slice_width = abs(slice_start - slice_end) / (self.intersection_count)
+
+
+    section_positions = [slice_start + (i * slice_width) for i in range(self.intersection_count + 1)]
+    slices = self.hull_body.Shape.slices(self.plane, section_positions)
+    print(f"{len(slices.Wires)} sections drawn for the {self.plane} axis")
+    for slice in slices.Wires:
+      #Part.show(slice)
+      wire = self.slice_to_edges(slice)
+      if not wire:
+        continue
+      self.append(wire)
+      
+
+  def slice_to_edges(self, slice):
+    edges = []
+    for edge in slice.Edges:
+      edges += self.filter_edge(edge)
+      #Part.show(edge)
+
+    try:
+      wire = Part.Wire(edges)
+    except:
+      return None
+
+    #Part.show(wire)
+    return wire
+
+  @classmethod
+  def filter_edge(cls, edge):
+    curve = edge.Curve
+    start_point = edge.firstVertex()
+    end_point = edge.lastVertex()
+
+    if start_point.X < -0.0001 or end_point.X < -0.0001:
+      return []
+
+    return [edge]
+
+
+class Slice_CrossSection(Slice_Base):
+  plane = App.Vector(0, 1, 0)
+
+
+class Slice_Waterline(Slice_Base):
+  plane = App.Vector(0, 0, 1)
+
+
+class Slice_Profile(Slice_Base):
+  plane = App.Vector(1, 0, 0)
+
+
+class View_Base:
+  intersection_count: int = 12
+  name: str = "base_class"
+
+  def __init__(self, parent_name: str, doc, hull_body, data: Slice_Base):
+    self.name = f"{parent_name}__{self.plan_name}"
+    self.wireframe_name = f"{parent_name}__{self.wireframe_name}"
+    self.doc = doc
+    self.hull_body = hull_body
+    self.data = data
+
+    self.create_blank_sketch()
+
+    for slice_index, slice in enumerate(self.data):
+      self.parse_slice(slice, slice_index)
+
+    for shape in self.wireframe.OutList:
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).LineColor = self.colour
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).PointColor = self.colour
+
+  def create_blank_sketch(self):
+    self.wireframe = create_group(self.doc, self.wireframe_name)
+
+  def parse_slice(self, slice, slice_index):
+    new_object = Part.show(slice)
+    self.wireframe.addObjects([new_object])
+
+
+class View_Body(View_Base):
+  plan_name = "plan_body"
+  wireframe_name = "wireframe_body"
+  plan_offset = App.Vector(+2000.0, 0.0, 0.0)
+  colour_fore = (255, 0, 0)
+  colour_aft = (255, 255, 0)
+  colour = (255, 0, 0)
+
+  def __init__(self, parent_name: str, doc, hull_body, data: Slice_Base):
+    super().__init__(parent_name, doc, hull_body, data)
+
+    for shape in self.wireframe_fore.OutList:
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).LineColor = self.colour_fore
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).PointColor = self.colour_fore
+
+    for shape in self.wireframe_aft.OutList:
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).LineColor = self.colour_aft
+      FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).PointColor = self.colour_aft
+
+
+  def create_blank_sketch(self):
+    self.wireframe_fore = create_group(self.doc, f"{self.wireframe_name}_fore")
+    self.wireframe_aft = create_group(self.doc, f"{self.wireframe_name}_aft")
+    self.wireframe = self.wireframe_fore
+
+  def parse_slice(self, slice, slice_index):
+    if slice_index < self.data.intersection_count / 2:
+      self.wireframe = self.wireframe_fore
+      self.colour = self.colour_fore
+    else:
+      self.wireframe = self.wireframe_aft
+      self.colour = self.colour_aft
+
+    super().parse_slice(slice, slice_index)
+
+
+class View_Waterline(View_Base):
+  plan_name = "plan_waterline"
+  wireframe_name = "wireframe_waterline"
+  plan_offset = App.Vector(+4000.0, 0.0, 0.0)
+  colour = (0, 255, 0)
+
+
+class View_Profile(View_Base):
+  plan_name = "plan_profile"
+  wireframe_name = "wireframe_profile"
+  plan_offset = App.Vector(+6000.0, 0.0, 0.0)
+  colour = (0, 0, 255)
+
+
+class Plans:
+  def __init__(self, doc, parent_name: str):
+    self.doc = doc
+
+    group_profile = create_group(doc, f"{parent_name}__plan_profile")
+    group_body = create_group(doc, f"{parent_name}__plan_body")
+    group_waterline = create_group(doc, f"{parent_name}__plan_waterline")
+
+    #self.project_wires(parent_name)
+
+  #def project_wires(self, parent_name):
+    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_profile"):
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, True, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+
+    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, True, False)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+
+    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, True, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+
+    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_waterline"):
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, True, False)
+
+  def draw_line(self, shape, direction, x_pos, group, foreground: bool, mirror: bool):
+    outline, _, _, _ = TechDraw.project(shape, direction)
+    new = Part.show(outline, "outline")
+
+    if mirror:
+      new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 180)
+    else:
+      new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 0)
+
+    if foreground:
+      FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).LineWidth = 2
+      FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).PointSize = 2
+    else:
+      FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).LineWidth = 1
+      FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).PointSize = 1
+
+    group.addObjects([new])
+
+
+def create_group(doc, name):
+  print(f"Checking for: {name}")
+  group = doc.getObjectsByLabel(name)
+  if group:
+    print(f"Removing previous sketch: {name}")
+    OpenSCADUtils.removesubtree(group)
+
+  return doc.addObject('App::DocumentObjectGroup', name)
+
+def get_body():
+  selected_objects = Gui.Selection.getSelection()
+  if len(selected_objects) != 1:
+    return None
+
+  selected_object = selected_objects[0]
+  if selected_object.TypeId == "PartDesign::Body":
+    if "__plan_" in selected_object.Name:
+      original_name = selected_object.Name.split("__plan_")[0]
+      selected_object = doc.getObjectsByLabel(original_name)[0]
+    return selected_object
+
+  selected_object = selected_object.getParent()
+  if selected_object.TypeId == "PartDesign::Body":
+    if "__plan_" in selected_object.Name:
+      original_name = selected_object.Name.split("__plan_")[0]
+      selected_object = doc.getObjectsByLabel(original_name)[0]
+    return selected_object
+
+  return None
+
+
+
+doc = App.ActiveDocument
+body = get_body()
+
+start = time.perf_counter()
+if body:
+  data_x = Slice_Profile(body, intersection_count = 5)
+  View_Profile(body.Name, doc, body, data_x)
+
+  data_y = Slice_Waterline(body, intersection_count = 6)
+  View_Waterline(body.Name, doc, body, data_y)
+
+  data_z = Slice_CrossSection(body, intersection_count = 12)
+  View_Body(body.Name, doc, body, data_z)
+
+  Plans(doc, body.Name)
+else:
+  print("No hull selected.")
+
+end = time.perf_counter()
+print(f"Took {end - start} seconds")
+
