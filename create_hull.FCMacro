@@ -210,8 +210,6 @@ make_hull(doc)
 
 pr.disable()
 pr.dump_stats("profile.cprof")
-
-
 end = time.perf_counter()
 print(f"Took {end - start} seconds")
 

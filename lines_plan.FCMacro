@@ -2,6 +2,7 @@
 
 import math
 import time
+import cProfile
 
 import Draft
 import OpenSCADUtils
@@ -10,10 +11,11 @@ import TechDraw
 import Part
 
 class Slice_Base(list):
-  intersection_count: int 
+  intersection_count: int
   plane = App.Vector(0, 0, 0)
 
-  def __init__(self, hull_body, intersection_count = 12):
+  def __init__(self, doc, hull_body, intersection_count = 12):
+    self.doc = doc
     self.hull_body = hull_body
     self.intersection_count = intersection_count
 
@@ -48,36 +50,29 @@ class Slice_Base(list):
     print(f"{len(slices.Wires)} sections drawn for the {self.plane} axis")
     for slice in slices.Wires:
       #Part.show(slice)
-      wire = self.slice_to_edges(slice)
-      if not wire:
-        continue
-      self.append(wire)
-      
+      self += self.slice_to_edges(slice)
 
   def slice_to_edges(self, slice):
-    edges = []
+    all_edges = []
     for edge in slice.Edges:
-      edges += self.filter_edge(edge)
-      #Part.show(edge)
+      candiate = self.filter_edge(edge)
+      if candiate:
+        all_edges.append(candiate)
 
-    try:
-      wire = Part.Wire(edges)
-    except:
-      return None
-
-    #Part.show(wire)
-    return wire
+    wires = []
+    for wire in Part.sortEdges(all_edges):
+      wires.append(Part.Wire(wire))
+    return wires
 
   @classmethod
   def filter_edge(cls, edge):
-    curve = edge.Curve
     start_point = edge.firstVertex()
     end_point = edge.lastVertex()
 
     if start_point.X < -0.0001 or end_point.X < -0.0001:
-      return []
+      return None
 
-    return [edge]
+    return edge
 
 
 class Slice_CrossSection(Slice_Base):
@@ -90,6 +85,81 @@ class Slice_Waterline(Slice_Base):
 
 class Slice_Profile(Slice_Base):
   plane = App.Vector(1, 0, 0)
+
+
+class Slice_Diagonals(Slice_Base):
+  plane = App.Vector(1, 0, 1)
+
+  def slice(self):
+    """
+    The Diagonals don't follow the same pattern as the other perspectives.
+    The plane changes angle with each slice.
+    """
+    half_hull = self.doc.addObject('PartDesign::Body','half_hull')
+    clone = self.doc.addObject('PartDesign::FeatureBase','hull_clone')
+    half_hull.Group = [clone]
+    half_hull.Tip = clone
+    clone.BaseFeature = self.hull_body
+    clone.Placement = self.hull_body.Placement
+
+    half_hull.newObject('PartDesign::Plane','DatumPlane')
+    half_hull.getObject('DatumPlane').Placement = App.Placement(
+        App.Vector(0, 0, 0), App.Rotation(App.Vector(0, 1, 0), 90))
+
+    pocket = half_hull.newObject('PartDesign::Pocket','Pocket')
+    pocket.Profile = (App.getDocument('dingy').getObject('DatumPlane'), ['',])
+    pocket.Length = 5
+
+    self.doc.recompute()
+
+    bound_box = self.hull_body.Shape.BoundBox
+
+    slice_range = bound_box.ZLength
+    slice_distance_step = slice_range / (self.intersection_count + 1)
+    slice_angle_step = 90.0 / (self.intersection_count + 1)
+
+    angle = slice_angle_step
+    dist = slice_distance_step
+
+    while angle <= 90.0:
+      plane = App.Vector(math.cos(math.radians(angle)), 0, math.sin(math.radians(angle)))
+      slice = half_hull.Shape.slice(plane, math.sin(math.radians(angle)) * dist)[0]
+
+      wires = self.slice_to_edges(slice)
+      if len(wires) > 1:
+        # Only want the outermost wire.
+        # Other wires may be drawn eg: if the plane cuts through the deck.
+        best_candidate = None
+        best_distance = bound_box.XLength
+        for candidate in wires:
+          dist = candidate.distToShape(Part.Point(App.Vector(bound_box.XLength, 0, 0)).toShape())[0]
+          if dist < best_distance:
+            best_distance = dist
+            best_candidate = candidate
+
+        self.append(best_candidate)
+      else:
+        self += wires
+
+      angle += slice_angle_step
+      dist += slice_distance_step
+
+    #for wire in self:
+    #  Part.show(wire)
+
+    half_hull.removeObjectsFromDocument()
+    self.doc.removeObject(half_hull.Name)
+
+  @classmethod
+  def filter_edge(cls, edge):
+    start_point = edge.firstVertex()
+    end_point = edge.lastVertex()
+
+    if start_point.X < 0.0001 and end_point.X < 0.0001:
+      return None
+
+    #Part.show(edge)
+    return edge
 
 
 class View_Base:
@@ -170,6 +240,13 @@ class View_Profile(View_Base):
   colour = (0, 0, 255)
 
 
+class View_Diagonals(View_Base):
+  plan_name = "plan_diagonal"
+  wireframe_name = "wireframe_diagonal"
+  plan_offset = App.Vector(+8000.0, 0.0, 0.0)
+  colour = (200, 200, 200)
+
+
 class Plans:
   def __init__(self, doc, parent_name: str):
     self.doc = doc
@@ -178,39 +255,55 @@ class Plans:
     group_body = create_group(doc, f"{parent_name}__plan_body")
     group_waterline = create_group(doc, f"{parent_name}__plan_waterline")
 
-    #self.project_wires(parent_name)
+    offset_plan_profile = 1000
+    offset_plan_body = 2000
+    offset_plan_waterline = 3500
 
-  #def project_wires(self, parent_name):
     for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_profile"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, True, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, True, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, True, False)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, False)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, True, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_waterline"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), 1000, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), 2000, group_body, False, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), 3000, group_waterline, True, False)
+      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, False)
+
+    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
+      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, True)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+
 
   def draw_line(self, shape, direction, x_pos, group, foreground: bool, mirror: bool):
     outline, _, _, _ = TechDraw.project(shape, direction)
     new = Part.show(outline, "outline")
 
     if mirror:
-      new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 180)
+      if direction == App.Vector(0, 1, 0):
+        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 180)
+      else:
+        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(0, 1, 0), 180)
     else:
-      new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 0)
+      if direction == App.Vector(0, 1, 0):
+        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 0)
+      else:
+        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(0, 1, 0), 0)
 
     if foreground:
       FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).LineWidth = 2
@@ -258,20 +351,28 @@ doc = App.ActiveDocument
 body = get_body()
 
 start = time.perf_counter()
+pr = cProfile.Profile()
+pr.enable()
+
 if body:
-  data_x = Slice_Profile(body, intersection_count = 5)
+  data_x = Slice_Profile(doc, body, intersection_count = 5)
   View_Profile(body.Name, doc, body, data_x)
 
-  data_y = Slice_Waterline(body, intersection_count = 6)
+  data_y = Slice_Waterline(doc, body, intersection_count = 6)
   View_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(body, intersection_count = 12)
+  data_z = Slice_CrossSection(doc, body, intersection_count = 12)
   View_Body(body.Name, doc, body, data_z)
+
+  data_xz = Slice_Diagonals(doc, body, intersection_count = 6)
+  View_Diagonals(body.Name, doc, body, data_xz)
 
   Plans(doc, body.Name)
 else:
   print("No hull selected.")
 
+pr.disable()
+pr.dump_stats("profile.cprof")
 end = time.perf_counter()
 print(f"Took {end - start} seconds")
 
