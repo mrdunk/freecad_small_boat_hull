@@ -13,6 +13,7 @@ import Part
 class Slice_Base(list):
   intersection_count: int
   plane = App.Vector(0, 0, 0)
+  lowest_point = 0
 
   def __init__(self, doc, hull_body, intersection_count = 12):
     self.doc = doc
@@ -23,6 +24,7 @@ class Slice_Base(list):
 
   def slice(self):
     bound_box = self.hull_body.Shape.BoundBox
+    self.lowest_point = bound_box.ZMin
 
     if self.plane == App.Vector(1, 0, 0):
       slice_range = bound_box.XLength
@@ -119,33 +121,31 @@ class Slice_Diagonals(Slice_Base):
     slice_angle_step = 90.0 / (self.intersection_count + 1)
 
     angle = slice_angle_step
-    dist = slice_distance_step
+    dist = slice_distance_step + bound_box.ZMin
 
     while angle <= 90.0:
       plane = App.Vector(math.cos(math.radians(angle)), 0, math.sin(math.radians(angle)))
-      slice = half_hull.Shape.slice(plane, math.sin(math.radians(angle)) * dist)[0]
+      slices = half_hull.Shape.slice(plane, math.sin(math.radians(angle)) * dist)
+      if not slices:
+        angle += slice_angle_step
+        dist += slice_distance_step
+        continue
+
+      slice = slices[0]
 
       wires = self.slice_to_edges(slice)
-      if len(wires) > 1:
-        # Only want the outermost wire.
-        # Other wires may be drawn eg: if the plane cuts through the deck.
-        best_candidate = None
-        best_distance = bound_box.XLength
-        for candidate in wires:
-          dist = candidate.distToShape(Part.Point(App.Vector(bound_box.XLength, 0, 0)).toShape())[0]
-          if dist < best_distance:
-            best_distance = dist
-            best_candidate = candidate
 
-        self.append(best_candidate)
-      else:
-        self += wires
+      # Only want the outermost wire.
+      # Other wires may be drawn eg: if the plane cuts through the deck.
+      # Assume the longest wire is the one we want.
+      longest = None
+      for wire in wires:
+        if longest is None or wire.Length > longest.Length:
+          longest = wire
+      self.append(longest)
 
       angle += slice_angle_step
       dist += slice_distance_step
-
-    #for wire in self:
-    #  Part.show(wire)
 
     half_hull.removeObjectsFromDocument()
     self.doc.removeObject(half_hull.Name)
@@ -248,8 +248,9 @@ class View_Diagonals(View_Base):
 
 
 class Plans:
-  def __init__(self, doc, parent_name: str):
+  def __init__(self, doc, parent_name: str, lowest_point: float):
     self.doc = doc
+    self.lowest_point = lowest_point
 
     group_profile = create_group(doc, f"{parent_name}__plan_profile")
     group_body = create_group(doc, f"{parent_name}__plan_body")
@@ -295,15 +296,25 @@ class Plans:
     new = Part.show(outline, "outline")
 
     if mirror:
-      if direction == App.Vector(0, 1, 0):
-        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 180)
+      if direction == App.Vector(1, 0, 0):
+        new.Placement = App.Placement(
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(0, 1, 0), 180)
+      elif direction == App.Vector(0, 1, 0):
+        new.Placement = App.Placement(
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(1, 0, 0), 180)
       else:
-        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(0, 1, 0), 180)
+        new.Placement = App.Placement(
+            App.Vector(x_pos, 0, self.lowest_point), App.Vector(0, 1, 0), 180)
     else:
-      if direction == App.Vector(0, 1, 0):
-        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(1, 0, 0), 0)
+      if direction == App.Vector(1, 0, 0):
+        new.Placement = App.Placement(
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(0, 1, 0), 0)
+      elif direction == App.Vector(0, 1, 0):
+        new.Placement = App.Placement(
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(1, 0, 0), 0)
       else:
-        new.Placement = App.Placement(App.Vector(x_pos, 0, 0), App.Vector(0, 1, 0), 0)
+        new.Placement = App.Placement(
+            App.Vector(x_pos, 0, self.lowest_point), App.Vector(0, 1, 0), 0)
 
     if foreground:
       FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).LineWidth = 2
@@ -367,7 +378,10 @@ if body:
   data_xz = Slice_Diagonals(doc, body, intersection_count = 6)
   View_Diagonals(body.Name, doc, body, data_xz)
 
-  Plans(doc, body.Name)
+  lowest_point = min(data_x.lowest_point, data_y.lowest_point)
+  lowest_point = min(lowest_point, data_z.lowest_point)
+
+  Plans(doc, body.Name, lowest_point)
 else:
   print("No hull selected.")
 

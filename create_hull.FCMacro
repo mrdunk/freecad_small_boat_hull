@@ -86,7 +86,8 @@ def make_hull(doc):
 def make_section(doc, hull_index, name, z, plane, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
   """Create geometry for the hull's cross-section at a specific point between bow and stern."""
   sketch = doc.newObject("Sketcher::SketchObject", name)
-  sketch.AttachmentOffset = App.Placement(App.Vector(0, 0, z + hull_index * 4000), App.Rotation(App.Vector(0, 0, 1), 0))
+  #sketch.AttachmentOffset = App.Placement(App.Vector(0, 0, z + hull_index * 4000), App.Rotation(App.Vector(0, 0, 1), 0))
+  sketch.AttachmentOffset = App.Placement(App.Vector(0, hull_index * 2000, z), App.Rotation(App.Vector(0, 0, 1), 0))
   sketch.AttachmentSupport = (plane,[''])
   sketch.MapMode = 'FlatFace'
 
