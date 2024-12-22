@@ -9,6 +9,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 from FreeCAD import Vector
+from FreeCAD import Units
 from PySide import QtGui
 import DraftGeomUtils
 
@@ -25,10 +26,10 @@ def make_hull(doc):
     origin = body.OutList[0]
     plane = [p for p in origin.OutList if "XZ" in p.Name][0]
 
-    deck_length = int(App.ActiveDocument.VarSet.deck_length)
-    deck_width = int(App.ActiveDocument.VarSet.deck_width)
-    highest = int(App.ActiveDocument.VarSet.Base_deck_height + App.ActiveDocument.VarSet.Base_prow_height) + 1
-    lowest = -1
+    deck_length = App.ActiveDocument.VarSet.deck_length
+    deck_width = App.ActiveDocument.VarSet.deck_width
+    highest = App.ActiveDocument.VarSet.Base_deck_height + App.ActiveDocument.VarSet.Base_prow_height
+    lowest = -1.0
     section_count = App.ActiveDocument.VarSet.section_count
     step_len = deck_length / (section_count - 1)
 
@@ -46,17 +47,17 @@ def make_hull(doc):
 
     cross_sections = []
 
-    for index, section_pos in enumerate(range(int(-deck_length / 2), int(deck_length / 2) + 1, int(step_len))):
-      if section_pos < int(-deck_length / 2) + 1:
-        section_pos += 1
-      if section_pos > int(deck_length / 2) - 1:
-        section_pos -= 1
+    #for index, section_pos in enumerate(range(int(-deck_length / 2), int(deck_length / 2) + 1, int(step_len))):
+    section_pos = -deck_length / 2 + Units.Quantity("0.0001mm")
+    index = 0
+    while round(section_pos) <= round(deck_length / 2):
+      print(index, section_pos)
 
       section_name = f"section_{index}"
       #print(f"Creating {section_name} at {section_pos}.")
 
       # Plane for calculating intersections.
-      intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, -section_pos, 0), App.Vector(0, 1, 0))
+      intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, section_pos, 0), App.Vector(0, 1, 0))
       #Part.show(intersection_plane, f"plane_{index}")
 
       deck_plan_intersection = get_intersection(sketch_plan_deck, intersection_plane, section_pos)
@@ -66,9 +67,9 @@ def make_hull(doc):
       hull_curve_horizontal_intersection = get_intersection(sketch_hull_curve_horizontal, intersection_plane, section_pos)
 
       section = make_section(
-	  body, hull_index, section_name, section_pos,
-	  plane, deck_plan_intersection, deck_height_intersection, keel_height_intersection,
-	  hull_curve_height_intersection, hull_curve_horizontal_intersection)
+        body, hull_index, section_name, section_pos,
+        plane, deck_plan_intersection, deck_height_intersection, keel_height_intersection,
+        hull_curve_height_intersection, hull_curve_horizontal_intersection)
 
       if not cross_sections:
         additive_loft.Profile = section
@@ -82,6 +83,11 @@ def make_hull(doc):
 				 keel_height_intersection, hull_curve_height_intersection, hull_curve_horizontal_intersection)
 
       section.Visibility = False
+
+      section_pos += step_len
+      index += 1
+    print("----")
+    print(index, section_pos)
 
 def make_section(doc, hull_index, name, z, plane, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
   """Create geometry for the hull's cross-section at a specific point between bow and stern."""
@@ -160,7 +166,7 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_
 
   constraintList.append(Sketcher.Constraint('DistanceX', 1, 1, deck_plan.X))
   constraintList.append(Sketcher.Constraint('DistanceY', 1, 1, deck_height.Z))
-
+  
   # Port
   geoList.append(Part.LineSegment(App.Vector(0.0, 0.0, 0.0), App.Vector(250.0, 250.0, 0.0)))
   geoList.append(Part.LineSegment(App.Vector(250.0, 250.0, 0.0), App.Vector(500.0, 500.0, 0.0)))
@@ -182,7 +188,7 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_
   constraintList.append(Sketcher.Constraint('DistanceX', 4, 0, -deck_plan.X * 2))
   constraintList.append(Sketcher.Constraint('DistanceY', 4, 0, 0.0))
   constraintList.append(Sketcher.Constraint('DistanceY', 4, 1, deck_height.Z))
-
+  
   sketch.addGeometry(geoList, False)
   sketch.addConstraint(constraintList)
 

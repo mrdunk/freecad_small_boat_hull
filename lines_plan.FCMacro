@@ -5,10 +5,12 @@ import time
 import cProfile
 
 import Draft
-import OpenSCADUtils
 import FreeCADGui
+import OpenSCADUtils
 import TechDraw
 import Part
+import DraftGeomUtils
+from FreeCAD import Units
 
 class Slice_Base(list):
   intersection_count: int
@@ -28,8 +30,8 @@ class Slice_Base(list):
 
     if self.plane == App.Vector(1, 0, 0):
       slice_range = bound_box.XLength
-      slice_start = bound_box.XMin
-      slice_end = 1
+      slice_start = 0
+      slice_end = bound_box.XMax
     elif self.plane == App.Vector(0, 1, 0):
       slice_range = bound_box.YLength
       slice_start = bound_box.YMin
@@ -42,16 +44,15 @@ class Slice_Base(list):
     slice_width = slice_range / (self.intersection_count + 1)
 
     if self.plane == App.Vector(0, 1, 0):
-      slice_start = bound_box.YMin + slice_width / 4
+      slice_start = bound_box.YMin + slice_width / 4 + 1
       slice_end = bound_box.YMax - slice_width / 4
-      slice_width = abs(slice_start - slice_end) / (self.intersection_count)
+      slice_width = abs(slice_start - slice_end) / (self.intersection_count - 1)
 
+    section_positions = [slice_start + (i * slice_width) + 0.1 for i in range(self.intersection_count + 1)]
 
-    section_positions = [slice_start + (i * slice_width) for i in range(self.intersection_count + 1)]
     slices = self.hull_body.Shape.slices(self.plane, section_positions)
     print(f"{len(slices.Wires)} sections drawn for the {self.plane} axis")
     for slice in slices.Wires:
-      #Part.show(slice)
       self += self.slice_to_edges(slice)
 
   def slice_to_edges(self, slice):
@@ -76,6 +77,21 @@ class Slice_Base(list):
 
     return edge
 
+  def longest_element(self, axis: App.Vector):
+    longest = None
+    for wire in self:
+      if axis.x:
+        if longest is None or wire.BoundBox.XLength > longest.BoundBox.XLength:
+          longest = wire
+      elif axis.y:
+        if longest is None or wire.BoundBox.YLength > longest.BoundBox.YLength:
+          longest = wire
+      elif axis.z:
+        if longest is None or wire.BoundBox.ZLength > longest.BoundBox.ZLength:
+          longest = wire
+
+    return longest
+
 
 class Slice_CrossSection(Slice_Base):
   plane = App.Vector(0, 1, 0)
@@ -92,66 +108,65 @@ class Slice_Profile(Slice_Base):
 class Slice_Diagonals(Slice_Base):
   plane = App.Vector(1, 0, 1)
 
+  def __init__(self, doc, hull_body, ribs: Slice_CrossSection, intersection_count = 6):
+    self.ribs = ribs
+    super().__init__(doc, hull_body, intersection_count)
+
   def slice(self):
     """
     The Diagonals don't follow the same pattern as the other perspectives.
     The plane changes angle with each slice.
     """
-    half_hull = self.doc.addObject('PartDesign::Body','half_hull')
-    clone = self.doc.addObject('PartDesign::FeatureBase','hull_clone')
-    half_hull.Group = [clone]
-    half_hull.Tip = clone
-    clone.BaseFeature = self.hull_body
-    clone.Placement = self.hull_body.Placement
+    slice_angle_step = math.radians(90.0 / self.intersection_count / 1.8)
 
-    half_hull.newObject('PartDesign::Plane','DatumPlane')
-    half_hull.getObject('DatumPlane').Placement = App.Placement(
-        App.Vector(0, 0, 0), App.Rotation(App.Vector(0, 1, 0), 90))
+    angle = math.radians(90) - slice_angle_step
 
-    pocket = half_hull.newObject('PartDesign::Pocket','Pocket')
-    pocket.Profile = (App.getDocument('dingy').getObject('DatumPlane'), ['',])
-    pocket.Length = 5
+    for rib, position in self.iterate_longest_rib():
+      if angle <= 0:
+        break
 
-    self.doc.recompute()
+      position.z -= 1
+      dist = position.z - position.x / math.tan(-angle)
 
-    bound_box = self.hull_body.Shape.BoundBox
+      print(f"Calculating diagonal. angle: {round(math.degrees(angle), 2)}  height: {round(dist, 2)}")
 
-    slice_range = bound_box.ZLength
-    slice_distance_step = slice_range / (self.intersection_count + 1)
-    slice_angle_step = 90.0 / (self.intersection_count + 1)
-
-    angle = slice_angle_step
-    dist = slice_distance_step + bound_box.ZMin
-
-    while angle <= 90.0:
-      plane = App.Vector(math.cos(math.radians(angle)), 0, math.sin(math.radians(angle)))
-      slices = half_hull.Shape.slice(plane, math.sin(math.radians(angle)) * dist)
+      plane = App.Vector(math.cos(angle), 0, math.sin(angle))
+      slices = self.hull_body.Shape.slice(plane, math.sin(angle) * dist)
       if not slices:
-        angle += slice_angle_step
-        dist += slice_distance_step
         continue
 
-      slice = slices[0]
+      for slice in slices:
+        wires = self.slice_to_edges(slice)
+        self += wires
 
-      wires = self.slice_to_edges(slice)
+      angle -= slice_angle_step
 
-      # Only want the outermost wire.
-      # Other wires may be drawn eg: if the plane cuts through the deck.
-      # Assume the longest wire is the one we want.
-      longest = None
-      for wire in wires:
-        if longest is None or wire.Length > longest.Length:
-          longest = wire
-      self.append(longest)
+  def iterate_longest_rib(self):
+    rib = self.ribs.longest_element(self.plane)
+    #Part.show(rib, "rib")
+    part_length = rib.Length / self.intersection_count
+    rib_parts = rib.discretize(Distance = part_length)
+    distance = 0
+    for index, position in enumerate(rib_parts):
+      yield (rib, position)
+      distance += part_length
 
-      angle += slice_angle_step
-      dist += slice_distance_step
-
-    half_hull.removeObjectsFromDocument()
-    self.doc.removeObject(half_hull.Name)
 
   @classmethod
   def filter_edge(cls, edge):
+    # Filter intersections with deck.
+    sketch = doc.getObjectsByLabel('profile_deck')[0]
+    for sketch_edge in sketch.Shape.Edges:
+      for point in edge.Vertexes:
+        point = point.Point
+        point.x = 0
+        point.y = -point.y
+        point = Part.Vertex(point)
+        common = point.common([sketch_edge])
+        if common.Vertexes:
+          return None
+
+    # Filter edges ending when crossing over to other side of hull.
     start_point = edge.firstVertex()
     end_point = edge.lastVertex()
 
@@ -162,7 +177,10 @@ class Slice_Diagonals(Slice_Base):
     return edge
 
 
-class View_Base:
+class View_Wireframe_Base:
+  """
+  Base class to display wireframe of hull.
+  """
   intersection_count: int = 12
   name: str = "base_class"
 
@@ -186,11 +204,13 @@ class View_Base:
     self.wireframe = create_group(self.doc, self.wireframe_name)
 
   def parse_slice(self, slice, slice_index):
+    if not slice:
+      return
     new_object = Part.show(slice)
     self.wireframe.addObjects([new_object])
 
 
-class View_Body(View_Base):
+class View_Wireframe_Body(View_Wireframe_Base):
   plan_name = "plan_body"
   wireframe_name = "wireframe_body"
   plan_offset = App.Vector(+2000.0, 0.0, 0.0)
@@ -216,7 +236,7 @@ class View_Body(View_Base):
     self.wireframe = self.wireframe_fore
 
   def parse_slice(self, slice, slice_index):
-    if slice_index < self.data.intersection_count / 2:
+    if slice_index > self.data.intersection_count / 2:
       self.wireframe = self.wireframe_fore
       self.colour = self.colour_fore
     else:
@@ -226,21 +246,21 @@ class View_Body(View_Base):
     super().parse_slice(slice, slice_index)
 
 
-class View_Waterline(View_Base):
+class View_Wireframe_Waterline(View_Wireframe_Base):
   plan_name = "plan_waterline"
   wireframe_name = "wireframe_waterline"
   plan_offset = App.Vector(+4000.0, 0.0, 0.0)
   colour = (0, 255, 0)
 
 
-class View_Profile(View_Base):
+class View_Wireframe_Profile(View_Wireframe_Base):
   plan_name = "plan_profile"
   wireframe_name = "wireframe_profile"
   plan_offset = App.Vector(+6000.0, 0.0, 0.0)
   colour = (0, 0, 255)
 
 
-class View_Diagonals(View_Base):
+class View_Wireframe_Diagonals(View_Wireframe_Base):
   plan_name = "plan_diagonal"
   wireframe_name = "wireframe_diagonal"
   plan_offset = App.Vector(+8000.0, 0.0, 0.0)
@@ -295,26 +315,29 @@ class Plans:
     outline, _, _, _ = TechDraw.project(shape, direction)
     new = Part.show(outline, "outline")
 
+    if direction == App.Vector(1, 0, 0):
+      new.Placement = App.Placement(
+          App.Vector(x_pos - self.lowest_point, 0, self.lowest_point),
+          App.Vector(1, 0, 0), 180)
+
     if mirror:
-      if direction == App.Vector(1, 0, 0):
+      if direction == App.Vector(0, 1, 0):
         new.Placement = App.Placement(
-            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(0, 1, 0), 180)
-      elif direction == App.Vector(0, 1, 0):
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point),
+            App.Vector(1, 0, 0), 180)
+      elif direction == App.Vector(0, 0, 1):
         new.Placement = App.Placement(
-            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(1, 0, 0), 180)
-      else:
-        new.Placement = App.Placement(
-            App.Vector(x_pos, 0, self.lowest_point), App.Vector(0, 1, 0), 180)
+            App.Vector(x_pos, 0, self.lowest_point),
+            App.Vector(0, 1, 0), 180)
     else:
-      if direction == App.Vector(1, 0, 0):
+      if direction == App.Vector(0, 1, 0):
         new.Placement = App.Placement(
-            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(0, 1, 0), 0)
-      elif direction == App.Vector(0, 1, 0):
+            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point),
+            App.Vector(1, 0, 0), 0)
+      elif direction == App.Vector(0, 0, 1):
         new.Placement = App.Placement(
-            App.Vector(x_pos - self.lowest_point, 0, self.lowest_point), App.Vector(1, 0, 0), 0)
-      else:
-        new.Placement = App.Placement(
-            App.Vector(x_pos, 0, self.lowest_point), App.Vector(0, 1, 0), 0)
+            App.Vector(x_pos, 0, self.lowest_point),
+            App.Vector(0, 1, 0), 0)
 
     if foreground:
       FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).LineWidth = 2
@@ -356,6 +379,43 @@ def get_body():
 
   return None
 
+def perpendicular(wire, position):
+  """
+  Calculate angle perpendicular to wire.
+  Args:
+    wire: Part.Wire: A FreeCAD wire.
+    position: App.Vector: Position on wire to calculate angle at.
+  Returns:
+    Tuple:
+      Angle perpendicular to wire.
+      Position on Z axis line at angle passing through input position crosses.
+        Used for projecting slicing plane.
+  """
+  for edge in wire.OrderedEdges:
+    shapes = edge.Curve.toBiArcs(1)
+    for shape in shapes:
+      distance = shape.projectPoint(position, "Distance")
+      if len(distance) == 1 and distance[0] < 0.1:
+        if isinstance(shape, Part.ArcOfCircle):
+          vector = shape.Location - position
+        elif isinstance(shape, Part.LineSegment):
+          vector = (shape.EndPoint - shape.StartPoint).cross(App.Vector(0, 1, 0))
+        else:
+          print(shape)
+          continue
+
+        angle = vector.normalize().getAngle(App.Vector(0, 0, 1))
+        print(angle, math.degrees(angle))
+        angle += math.radians(10)
+
+        z = position.z - position.x / math.tan(-angle)
+        print(round(z, 2))
+
+        #Part.show(Part.makeLine(position, App.Vector(0, 0, z)),  "line")
+        #Part.show(Part.makeLine(position, position + vector.normalize() * 500),  "line")
+
+        return (angle, z)
+  return None
 
 
 doc = App.ActiveDocument
@@ -367,21 +427,23 @@ pr.enable()
 
 if body:
   data_x = Slice_Profile(doc, body, intersection_count = 5)
-  View_Profile(body.Name, doc, body, data_x)
+  View_Wireframe_Profile(body.Name, doc, body, data_x)
 
   data_y = Slice_Waterline(doc, body, intersection_count = 6)
-  View_Waterline(body.Name, doc, body, data_y)
+  View_Wireframe_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(doc, body, intersection_count = 12)
-  View_Body(body.Name, doc, body, data_z)
+  data_z = Slice_CrossSection(doc, body, intersection_count = 11)
+  View_Wireframe_Body(body.Name, doc, body, data_z)
 
-  data_xz = Slice_Diagonals(doc, body, intersection_count = 6)
-  View_Diagonals(body.Name, doc, body, data_xz)
+  data_xz = Slice_Diagonals(doc, body, data_z, intersection_count = 5)
+  View_Wireframe_Diagonals(body.Name, doc, body, data_xz)
 
   lowest_point = min(data_x.lowest_point, data_y.lowest_point)
   lowest_point = min(lowest_point, data_z.lowest_point)
 
   Plans(doc, body.Name, lowest_point)
+
+
 else:
   print("No hull selected.")
 
