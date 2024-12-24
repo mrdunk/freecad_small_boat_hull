@@ -137,12 +137,18 @@ class Slice_Diagonals(Slice_Base):
 
       for slice in slices:
         wires = self.slice_to_edges(slice)
+        if len(wires) > 1:
+          longest = None
+          for wire in wires:
+            if longest is None or wire.Length > longest.Length:
+              longest = wire
+          wires = [longest]
         self += wires
 
       angle -= slice_angle_step
 
   def iterate_longest_rib(self):
-    rib = self.ribs.longest_element(self.plane)
+    rib = self.ribs.longest_element(self.ribs.plane)
     #Part.show(rib, "rib")
     part_length = rib.Length / self.intersection_count
     rib_parts = rib.discretize(Distance = part_length)

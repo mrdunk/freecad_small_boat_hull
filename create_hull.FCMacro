@@ -13,10 +13,11 @@ from FreeCAD import Units
 from PySide import QtGui
 import DraftGeomUtils
 
-
-def make_hull(doc):
+def start_():
     label = "hull"
-    body = doc.addObject('PartDesign::Body','hull')
+    doc = App.ActiveDocument or App.newDocument()
+    body = doc.addObject('PartDesign::Body', label)
+    body_hollow = doc.addObject('PartDesign::Body', f"{label}_hollow")
 
     assert body.Name.startswith(label)
     hull_index = 0
@@ -26,11 +27,16 @@ def make_hull(doc):
     origin = body.OutList[0]
     plane = [p for p in origin.OutList if "XZ" in p.Name][0]
 
-    deck_length = App.ActiveDocument.VarSet.deck_length
-    deck_width = App.ActiveDocument.VarSet.deck_width
-    highest = App.ActiveDocument.VarSet.Base_deck_height + App.ActiveDocument.VarSet.Base_prow_height
+    return (doc, body, body_hollow, hull_index, plane)
+
+def make_hull_sections(doc, body, hull_index, plane):
+    dimensions = doc.getObjectsByLabel('dimensions')[0]
+
+    deck_length = dimensions.deck_length
+    deck_width = dimensions.deck_width
+    highest = dimensions.deck_height + dimensions.prow_height
     lowest = -1.0
-    section_count = App.ActiveDocument.VarSet.section_count
+    section_count = dimensions.section_count
     step_len = deck_length / (section_count - 1)
 
     # Templates outlining hull shape.
@@ -42,22 +48,18 @@ def make_hull(doc):
     sketch_hull_curve_height = doc.getObjectsByLabel('hull_curve_height')[0]
     sketch_hull_curve_horizontal = doc.getObjectsByLabel('hull_curve_horizontal')[0]
 
-    additive_loft = body.newObject('PartDesign::AdditiveLoft', f"hull_loft_{hull_index}")
-    additive_loft.Ruled = True
-
     cross_sections = []
 
-    #for index, section_pos in enumerate(range(int(-deck_length / 2), int(deck_length / 2) + 1, int(step_len))):
     section_pos = -deck_length / 2 + Units.Quantity("0.0001mm")
     index = 0
     while round(section_pos) <= round(deck_length / 2):
-      print(index, section_pos)
+      print(index, round(section_pos, 2))
 
       section_name = f"section_{index}"
       #print(f"Creating {section_name} at {section_pos}.")
 
       # Plane for calculating intersections.
-      intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, section_pos, 0), App.Vector(0, 1, 0))
+      intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, -section_pos, 0), App.Vector(0, 1, 0))
       #Part.show(intersection_plane, f"plane_{index}")
 
       deck_plan_intersection = get_intersection(sketch_plan_deck, intersection_plane, section_pos)
@@ -71,30 +73,25 @@ def make_hull(doc):
         plane, deck_plan_intersection, deck_height_intersection, keel_height_intersection,
         hull_curve_height_intersection, hull_curve_horizontal_intersection)
 
-      if not cross_sections:
-        additive_loft.Profile = section
-      else:
-        additive_loft.Sections += [section]
-
-      cross_sections.append(section)
-
       section = simplify_section(section, section_pos,
 				 deck_plan_intersection, deck_height_intersection,
 				 keel_height_intersection, hull_curve_height_intersection, hull_curve_horizontal_intersection)
+
+      cross_sections.append((section_pos, section))
 
       section.Visibility = False
 
       section_pos += step_len
       index += 1
-    print("----")
-    print(index, section_pos)
 
-def make_section(doc, hull_index, name, z, plane, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
+    return cross_sections
+
+def make_section(body, hull_index, name, z, plane, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
   """Create geometry for the hull's cross-section at a specific point between bow and stern."""
-  sketch = doc.newObject("Sketcher::SketchObject", name)
+  sketch = body.newObject("Sketcher::SketchObject", name)
   #sketch.AttachmentOffset = App.Placement(App.Vector(0, 0, z + hull_index * 4000), App.Rotation(App.Vector(0, 0, 1), 0))
   sketch.AttachmentOffset = App.Placement(App.Vector(0, hull_index * 2000, z), App.Rotation(App.Vector(0, 0, 1), 0))
-  sketch.AttachmentSupport = (plane,[''])
+  sketch.AttachmentSupport = (plane, [''])
   sketch.MapMode = 'FlatFace'
 
   geoList = []
@@ -140,7 +137,7 @@ def make_section(doc, hull_index, name, z, plane, deck_plan, deck_height, keel_h
   return sketch
 
 def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
-  """Check if hull's deadrise crosses above the gunwhale, making the arc in the geometry unnecessary (and troublesome)."""
+  """Check if hull's deadrise crosses above the gunwale, making the arc in the geometry unnecessary (and troublesome)."""
   sketch.recompute()
   if sketch.Shape.Edges and not abs(
       sketch.Shape.Edges[1].LastParameter - sketch.Shape.Edges[1].FirstParameter) > math.pi:
@@ -192,7 +189,59 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_
   sketch.addGeometry(geoList, False)
   sketch.addConstraint(constraintList)
 
+  sketch.recompute()
+
   return sketch
+
+def make_section_hollow(section, position, body_hollow, plane):
+  new_sketch = body_hollow.newObject("Sketcher::SketchObject", f"{section.Name}_hollow")
+  new_sketch.AttachmentOffset = App.Placement(App.Vector(0, hull_index * 2000, position), App.Rotation(App.Vector(0, 0, 1), 0))
+  new_sketch.AttachmentSupport = (plane, [''])
+  new_sketch.MapMode = 'FlatFace'
+
+  geoList = []
+  for shape in section.Geometry:
+    if shape.EndPoint.y == shape.StartPoint.y:
+      continue
+    geoList.append(shape.copy())
+
+  new_sketch.addGeometry(geoList, False)
+
+  new_sketch.recompute()
+  offset = App.ActiveDocument.addObject("Part::Offset2D", f"Offset2D_{section.Name}_hollow")
+  offset.Source = new_sketch
+  offset.Value = 2.0
+  offset.Mode = 1
+  offset.Join = 2
+  offset.Intersection = True
+  offset.Fill = False
+  return offset
+
+  #return new_sketch
+
+def draw(sections, hull_index, body):
+    additive_loft = body.newObject('PartDesign::AdditiveLoft', f"hull_loft_{hull_index}")
+    additive_loft.Ruled = True
+
+    for _, cross_section in cross_sections:
+      if not additive_loft.Profile:
+        additive_loft.Profile = cross_section
+      else:
+        additive_loft.Sections += [cross_section]
+
+def draw_hollow(cross_sections, hull_index, body_hollow, plane):
+
+    additive_loft = body_hollow.newObject('PartDesign::AdditiveLoft', f"hull_loft_hollow_{hull_index}")
+    additive_loft.Ruled = True
+
+    first = 0
+    for position, cross_section in cross_sections:
+      new_sketch = make_section_hollow(cross_section, position, body_hollow, plane)
+      if first < 3:
+        first += 1
+        additive_loft.Profile = new_sketch
+      else:
+        additive_loft.Sections += [new_sketch]
 
 def get_intersection(sketch, plane, pos):
   for edge in sketch.Shape.Edges:
@@ -211,9 +260,10 @@ start = time.perf_counter()
 pr = cProfile.Profile()
 pr.enable()
 
-doc = App.ActiveDocument or App.newDocument()
-
-make_hull(doc)
+doc, body, body_hollow, hull_index, plane= start_()
+cross_sections = make_hull_sections(doc, body, hull_index, plane)
+draw(cross_sections, hull_index, body)
+draw_hollow(cross_sections, hull_index, body_hollow, plane)
 
 pr.disable()
 pr.dump_stats("profile.cprof")
