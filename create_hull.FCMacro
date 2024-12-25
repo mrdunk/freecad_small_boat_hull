@@ -1,4 +1,5 @@
 # vim: set ft=python :
+# vim: set expandtab :
 
 import pdb
 import math
@@ -37,7 +38,7 @@ def make_hull_sections(doc, body, hull_index, plane):
     highest = dimensions.deck_height + dimensions.prow_height
     lowest = -1.0
     section_count = dimensions.section_count
-    step_len = deck_length / (section_count - 1)
+    step_len = (deck_length - Units.Quantity("2mm")) / (section_count - 1)
 
     # Templates outlining hull shape.
     sketch_profile_deck = doc.getObjectsByLabel('profile_deck')[0]
@@ -50,7 +51,7 @@ def make_hull_sections(doc, body, hull_index, plane):
 
     cross_sections = []
 
-    section_pos = -deck_length / 2 + Units.Quantity("0.0001mm")
+    section_pos = -deck_length / 2 + Units.Quantity("1mm")
     index = 0
     while round(section_pos) <= round(deck_length / 2):
       print(index, round(section_pos, 2))
@@ -75,7 +76,7 @@ def make_hull_sections(doc, body, hull_index, plane):
 
       section = simplify_section(section, section_pos,
 				 deck_plan_intersection, deck_height_intersection,
-				 keel_height_intersection, hull_curve_height_intersection, hull_curve_horizontal_intersection)
+				 keel_height_intersection)
 
       cross_sections.append((section_pos, section))
 
@@ -136,7 +137,7 @@ def make_section(body, hull_index, name, z, plane, deck_plan, deck_height, keel_
 
   return sketch
 
-def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_height, hull_curve_horizontal):
+def simplify_section(sketch, z, deck_plan, deck_height, keel_height):
   """Check if hull's deadrise crosses above the gunwale, making the arc in the geometry unnecessary (and troublesome)."""
   sketch.recompute()
   if sketch.Shape.Edges and not abs(
@@ -153,16 +154,22 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_
   # Starboard
   geoList.append(Part.LineSegment(App.Vector(0.0, 0.0, 0.0), App.Vector(-250.0, 250.0, 0.0)))
   geoList.append(Part.LineSegment(App.Vector(-250.0, 250.0, 0.0), App.Vector(-500.0, 500.0, 0.0)))
+  
+  start = App.Vector(0, keel_height.Z, 0)
+  end = App.Vector(deck_plan.X, deck_height.Z, 0)
+  vector = end - start
+  half_way = start + (vector / 2)
+
   constraintList.append(Sketcher.Constraint('DistanceX', -1, 1, 0, 1, 0.0))
   constraintList.append(Sketcher.Constraint('DistanceY', 0, 1, keel_height.Z))
 
-  constraintList.append(Sketcher.Constraint('DistanceX', 0, 2, deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 0, 2, deck_height.Z - 0.1))
+  constraintList.append(Sketcher.Constraint('DistanceX', 0, 2, half_way.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 0, 2, half_way.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 1, 1, half_way.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 1, 1, half_way.y))
+  
   constraintList.append(Sketcher.Constraint('DistanceX', 1, 2, deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 1, 2, deck_height.Z - 0.1))
-
-  constraintList.append(Sketcher.Constraint('DistanceX', 1, 1, deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 1, 1, deck_height.Z))
+  constraintList.append(Sketcher.Constraint('DistanceY', 1, 2, deck_height.Z))
   
   # Port
   geoList.append(Part.LineSegment(App.Vector(0.0, 0.0, 0.0), App.Vector(250.0, 250.0, 0.0)))
@@ -170,13 +177,13 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height, hull_curve_
   constraintList.append(Sketcher.Constraint('DistanceX', -1, 1, 2, 1, 0.0))
   constraintList.append(Sketcher.Constraint('DistanceY', 2, 1, keel_height.Z))
 
-  constraintList.append(Sketcher.Constraint('DistanceX', 2, 2, -deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 2, 2, deck_height.Z - 0.1))
+  constraintList.append(Sketcher.Constraint('DistanceX', 2, 2, -half_way.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 2, 2, half_way.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 3, 1, -half_way.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 3, 1, half_way.y))
+  
   constraintList.append(Sketcher.Constraint('DistanceX', 3, 2, -deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 3, 2, deck_height.Z - 0.1))
-
-  constraintList.append(Sketcher.Constraint('DistanceX', 3, 1, -deck_plan.X))
-  constraintList.append(Sketcher.Constraint('DistanceY', 3, 1, deck_height.Z))
+  constraintList.append(Sketcher.Constraint('DistanceY', 3, 2, deck_height.Z))
 
   # Deck
   geoList.append(Part.LineSegment(App.Vector(-500.0, 500.0, 0.0), App.Vector(500.0, 500.0, 0.0)))
@@ -202,22 +209,67 @@ def make_section_hollow(section, position, body_hollow, plane):
   geoList = []
   for shape in section.Geometry:
     if shape.EndPoint.y == shape.StartPoint.y:
+      # Deck. To be skipped for open topped hull shell.
       continue
     geoList.append(shape.copy())
 
-  new_sketch.addGeometry(geoList, False)
+  hullThickness = 5
+  moreGeoList = []
+  highest_shape = None
+  highest_more = None
+  highest_port = [0, []]
+  highest_starboard = [0, []]
+  for shape in geoList:
+    if isinstance(shape, Part.ArcOfCircle):
+      moreGeoList.append(
+	  Part.ArcOfCircle(
+	    Part.Circle(shape.Location, App.Vector(0, 0, 1), shape.Radius + hullThickness),
+	    shape.FirstParameter, shape.LastParameter)
+      )
+    elif isinstance(shape, Part.LineSegment):
+      join_bottom = False
+      vector = (shape.EndPoint - shape.StartPoint).cross(App.Vector(0, 0, 1))
+      if vector.Length:
+        vector = vector.normalize()
+      if shape.StartPoint.x == 0 or shape.EndPoint.x == 0:
+        if shape.EndPoint.x < 0 or shape.StartPoint.x < 0:
+          join_bottom = True
+      if shape.EndPoint.x < 0 or shape.StartPoint.x < 0:
+        vector = vector.negative()
 
-  new_sketch.recompute()
-  offset = App.ActiveDocument.addObject("Part::Offset2D", f"Offset2D_{section.Name}_hollow")
-  offset.Source = new_sketch
-  offset.Value = 2.0
-  offset.Mode = 1
-  offset.Join = 2
-  offset.Intersection = True
-  offset.Fill = False
-  return offset
+      moreGeoList.append(
+	  Part.LineSegment(shape.StartPoint + vector * hullThickness, shape.EndPoint + vector * hullThickness)
+      )
 
-  #return new_sketch
+      if join_bottom:
+        if shape.EndPoint.x == 0:
+          center = shape.EndPoint
+        else:
+          center = shape.StartPoint
+        moreGeoList.append(
+            Part.ArcOfCircle(
+              Part.Circle(center, App.Vector(0, 0, 1), hullThickness),
+              -vector.getAngle(App.Vector(1, 0, 0)),
+              math.pi + vector.getAngle(App.Vector(1, 0, 0))
+            )
+        )
+
+    highest = highest_end(shape)
+    height = highest.y
+    if height > highest_port[0] and highest.x < 0:
+        highest_port = [height, (shape, moreGeoList[-1])]
+    if height > highest_starboard[0] and highest.x >= 0:
+        highest_starboard = [height, (shape, moreGeoList[-1])]
+
+  moreGeoList.append(Part.LineSegment(highest_end(highest_port[1][0]), highest_end(highest_port[1][1])))
+  moreGeoList.append(Part.LineSegment(highest_end(highest_starboard[1][0]), highest_end(highest_starboard[1][1])))
+  
+  new_sketch.addGeometry(geoList + moreGeoList, False)
+
+  return new_sketch
+
+def highest_end(shape):
+  return max(shape.StartPoint, shape.EndPoint, key = lambda val : val.y)
 
 def draw(sections, hull_index, body):
     additive_loft = body.newObject('PartDesign::AdditiveLoft', f"hull_loft_{hull_index}")
@@ -234,11 +286,12 @@ def draw_hollow(cross_sections, hull_index, body_hollow, plane):
     additive_loft = body_hollow.newObject('PartDesign::AdditiveLoft', f"hull_loft_hollow_{hull_index}")
     additive_loft.Ruled = True
 
-    first = 0
+    first = True
     for position, cross_section in cross_sections:
       new_sketch = make_section_hollow(cross_section, position, body_hollow, plane)
-      if first < 3:
-        first += 1
+      print(first, new_sketch, new_sketch)
+      if first:
+        first = False
         additive_loft.Profile = new_sketch
       else:
         additive_loft.Sections += [new_sketch]
