@@ -80,8 +80,6 @@ def make_hull_sections(doc, body, hull_index, plane):
 
       cross_sections.append((section_pos, section))
 
-      section.Visibility = False
-
       section_pos += step_len
       index += 1
 
@@ -94,6 +92,7 @@ def make_section(body, hull_index, name, z, plane, deck_plan, deck_height, keel_
   sketch.AttachmentOffset = App.Placement(App.Vector(0, hull_index * 2000, z), App.Rotation(App.Vector(0, 0, 1), 0))
   sketch.AttachmentSupport = (plane, [''])
   sketch.MapMode = 'FlatFace'
+  sketch.Visibility = False
 
   geoList = []
   constraintList = []
@@ -132,8 +131,6 @@ def make_section(body, hull_index, name, z, plane, deck_plan, deck_height, keel_
 
   sketch.addGeometry(geoList, False)
   sketch.addConstraint(constraintList)
-
-  #sketch.recompute()
 
   return sketch
 
@@ -205,6 +202,7 @@ def make_section_hollow(section, position, body_hollow, plane):
   new_sketch.AttachmentOffset = App.Placement(App.Vector(0, hull_index * 2000, position), App.Rotation(App.Vector(0, 0, 1), 0))
   new_sketch.AttachmentSupport = (plane, [''])
   new_sketch.MapMode = 'FlatFace'
+  new_sketch.Visibility = False
 
   geoList = []
   for shape in section.Geometry:
@@ -282,16 +280,12 @@ def draw(sections, hull_index, body):
         additive_loft.Sections += [cross_section]
 
 def draw_hollow(cross_sections, hull_index, body_hollow, plane):
-
     additive_loft = body_hollow.newObject('PartDesign::AdditiveLoft', f"hull_loft_hollow_{hull_index}")
     additive_loft.Ruled = True
 
-    first = True
     for position, cross_section in cross_sections:
       new_sketch = make_section_hollow(cross_section, position, body_hollow, plane)
-      print(first, new_sketch, new_sketch)
-      if first:
-        first = False
+      if not additive_loft.Profile:
         additive_loft.Profile = new_sketch
       else:
         additive_loft.Sections += [new_sketch]

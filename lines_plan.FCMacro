@@ -17,41 +17,36 @@ class Slice_Base(list):
   intersection_count: int
   plane = App.Vector(0, 0, 0)
   lowest_point = 0
+  section_positions = []
 
-  def __init__(self, doc, hull_body, intersection_count = 12):
+  def __init__(self, doc, hull_body, intersection_count = 12, section_positions = []):
     self.doc = doc
     self.hull_body = hull_body
     self.intersection_count = intersection_count
-
-    self.slice()
-
-  def slice(self):
+    self.section_positions = section_positions
     bound_box = self.hull_body.Shape.BoundBox
     self.lowest_point = bound_box.ZMin
 
-    if self.plane == App.Vector(1, 0, 0):
-      slice_range = bound_box.XLength
-      slice_start = 0
-      slice_end = bound_box.XMax
-    elif self.plane == App.Vector(0, 1, 0):
-      slice_range = bound_box.YLength
-      slice_start = bound_box.YMin
-      slice_end = bound_box.YMax
-    elif self.plane == App.Vector(0, 0, 1):
-      slice_range = bound_box.ZLength
-      slice_start = bound_box.ZMin
-      slice_end = bound_box.ZMax
+    self.slice()
 
-    slice_width = slice_range / (self.intersection_count + 1)
+  def _setup_section_positions(self):
+    bound_box = self.hull_body.Shape.BoundBox
 
-    if self.plane == App.Vector(0, 1, 0):
-      slice_start = bound_box.YMin + slice_width / 4 + 1
-      slice_end = bound_box.YMax - slice_width / 4
-      slice_width = abs(slice_start - slice_end) / (self.intersection_count - 1)
+    self.slice_start = bound_box.ZMin
+    slice_range = bound_box.ZLength
+    self.slice_width = slice_range / (self.intersection_count + 1)
 
-    section_positions = [slice_start + (i * slice_width) + 0.1 for i in range(self.intersection_count + 1)]
+  def slice(self):
 
-    slices = self.hull_body.Shape.slices(self.plane, section_positions)
+    if not self.section_positions:
+      self._setup_section_positions()
+
+      self.section_positions = [
+            self.slice_start + (i * self.slice_width) + 0.1
+            for i in range(self.intersection_count + 1)
+          ]
+
+    slices = self.hull_body.Shape.slices(self.plane, self.section_positions)
     print(f"{len(slices.Wires)} sections drawn for the {self.plane} axis")
     for slice in slices.Wires:
       self += self.slice_to_edges(slice)
@@ -96,6 +91,17 @@ class Slice_Base(list):
 
 class Slice_CrossSection(Slice_Base):
   plane = App.Vector(0, 1, 0)
+
+  def _setup_section_positions(self):
+    bound_box = self.hull_body.Shape.BoundBox
+
+    if not self.section_positions:
+      slice_range = bound_box.YLength
+      slice_width = slice_range / (self.intersection_count + 1)
+      slice_end = bound_box.YMax - slice_width / 4
+
+      self.slice_start = bound_box.YMin + slice_width / 4 + 1
+      self.slice_width = abs(self.slice_start - slice_end) / (self.intersection_count - 1)
 
 
 class Slice_Waterline(Slice_Base):
@@ -161,24 +167,22 @@ class Slice_Diagonals(Slice_Base):
 
   @classmethod
   def filter_edge(cls, edge):
+    # Filter edges ending when crossing over to other side of hull.
+    start_point = edge.firstVertex()
+    end_point = edge.lastVertex()
+    if start_point.X < 0.0001 and end_point.X < 0.0001:
+      return None
+
     # Filter intersections with deck.
     sketch = doc.getObjectsByLabel('profile_deck')[0]
     for sketch_edge in sketch.Shape.Edges:
       for point in edge.Vertexes:
         point = point.Point
         point.x = 0
-        point.y = -point.y
         point = Part.Vertex(point)
         common = point.common([sketch_edge])
         if common.Vertexes:
           return None
-
-    # Filter edges ending when crossing over to other side of hull.
-    start_point = edge.firstVertex()
-    end_point = edge.lastVertex()
-
-    if start_point.X < 0.0001 and end_point.X < 0.0001:
-      return None
 
     #Part.show(edge)
     return edge
@@ -188,7 +192,6 @@ class View_Wireframe_Base:
   """
   Base class to display wireframe of hull.
   """
-  intersection_count: int = 12
   name: str = "base_class"
 
   def __init__(self, parent_name: str, doc, hull_body, data: Slice_Base):
@@ -243,7 +246,7 @@ class View_Wireframe_Body(View_Wireframe_Base):
     self.wireframe = self.wireframe_fore
 
   def parse_slice(self, slice, slice_index):
-    if slice_index > self.data.intersection_count / 2:
+    if slice_index > len(self.data) / 2:
       self.wireframe = self.wireframe_fore
       self.colour = self.colour_fore
     else:
@@ -356,6 +359,70 @@ class Plans:
     group.addObjects([new])
 
 
+class Components:
+  def __init__(self, doc, parent_name: str):
+    self.doc = doc
+    group_profile = create_group(doc, f"{parent_name}__components")
+    all_ribs = {}
+    rib_diagonal_intersections = {}
+
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
+      for shape in shapes.OutList:
+        self.index_ribs(shape.Shape, all_ribs)
+
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
+      for shape in shapes.OutList:
+        self.index_ribs(shape.Shape, all_ribs)
+
+    for rib in all_ribs.values():
+      per_rib = []
+      for rib_part in rib:
+        for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
+          for shape in shapes.OutList:
+            dist, vectors, _ = shape.Shape.distToShape(rib_part)
+            if dist < 0.1:
+              per_rib.append(vectors[0][0])
+      if per_rib:
+        y_pos = str(round(per_rib[0].y)).replace("-", "m")
+        rib_diagonal_intersections[y_pos] = per_rib
+      
+    for y_pos, per_rib in rib_diagonal_intersections.items():
+      if len(per_rib):
+        print(y_pos, len(per_rib), len(all_ribs[y_pos]))
+        #for rib in all_ribs[y_pos]:
+        #  Part.show(rib)
+
+  def index_ribs(self, shape, all_ribs):
+    y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
+    if y_pos not in all_ribs:
+      all_ribs[y_pos] = []
+
+    all_ribs[y_pos].append(Part.Shape([shape]))
+
+
+  def add_rib(self, group_profile, shape, all_ribs):
+    y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
+
+    new_shapes = []
+
+    new_wire = Part.Wire([shape.copy(), shape.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))])
+    new_shapes.append(Part.show(new_wire))
+
+    try:
+      offset = new_wire.makeOffset2D(-50, openResult = True, fill = True)
+      new_shapes.append(Part.show(offset))
+    except:
+      pass
+
+    if y_pos not in all_ribs:
+      all_ribs[y_pos] = []
+    all_ribs[y_pos] += new_shapes
+
+    part = create_group(doc, f"component_{y_pos}")
+    part.addObjects(new_shapes)
+    group_profile.addObjects([part])
+
+
 def create_group(doc, name):
   print(f"Checking for: {name}")
   group = doc.getObjectsByLabel(name)
@@ -439,7 +506,8 @@ if body:
   data_y = Slice_Waterline(doc, body, intersection_count = 6)
   View_Wireframe_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(doc, body, intersection_count = 11)
+  data_z = Slice_CrossSection(doc, body, intersection_count = 11, section_positions = [-1750, -1350, -900, -450, 0, 450, 900, 1350, 1750])
+  #data_z = Slice_CrossSection(doc, body, intersection_count = 11)
   View_Wireframe_Body(body.Name, doc, body, data_z)
 
   data_xz = Slice_Diagonals(doc, body, data_z, intersection_count = 5)
@@ -450,6 +518,7 @@ if body:
 
   Plans(doc, body.Name, lowest_point)
 
+  Components(doc, body.Name)  
 
 else:
   print("No hull selected.")
