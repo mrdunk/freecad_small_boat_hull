@@ -73,24 +73,24 @@ class Slice_Base(list):
 
     return edge
 
-  def longest_element(self, axis: App.Vector):
+  def longest_element(self):
     longest = None
     for wire in self:
-      if axis.x:
-        if longest is None or wire.BoundBox.XLength > longest.BoundBox.XLength:
-          longest = wire
-      elif axis.y:
-        if longest is None or wire.BoundBox.YLength > longest.BoundBox.YLength:
-          longest = wire
-      elif axis.z:
-        if longest is None or wire.BoundBox.ZLength > longest.BoundBox.ZLength:
-          longest = wire
+      if longest is None or wire.Length > longest.Length:
+        longest = wire
 
     return longest
 
 
 class Slice_CrossSection(Slice_Base):
   plane = App.Vector(0, 1, 0)
+
+  def _setup_section_positions(self):
+    bound_box = self.hull_body.Shape.BoundBox
+
+    self.slice_start = bound_box.YMin
+    slice_range = bound_box.YLength
+    self.slice_width = slice_range / (self.intersection_count + 1)
 
   def _setup_section_positions(self):
     bound_box = self.hull_body.Shape.BoundBox
@@ -107,9 +107,25 @@ class Slice_CrossSection(Slice_Base):
 class Slice_Waterline(Slice_Base):
   plane = App.Vector(0, 0, 1)
 
+  def _setup_section_positions(self):
+    bound_box = self.hull_body.Shape.BoundBox
+
+    self.slice_start = bound_box.ZMin
+    slice_range = bound_box.ZLength
+    self.slice_width = slice_range / (self.intersection_count + 1)
+
+
 
 class Slice_Profile(Slice_Base):
   plane = App.Vector(1, 0, 0)
+  
+  def _setup_section_positions(self):
+    bound_box = self.hull_body.Shape.BoundBox
+
+    self.slice_start = bound_box.XMin
+    slice_range = bound_box.XLength
+    self.slice_width = slice_range / (self.intersection_count + 1)
+
 
 
 class Slice_Diagonals(Slice_Base):
@@ -128,11 +144,10 @@ class Slice_Diagonals(Slice_Base):
 
     angle = math.radians(90) - slice_angle_step
 
-    for rib, position in self.iterate_longest_rib():
+    for _, position in self.iterate_longest_rib():
       if angle <= 0:
         break
 
-      position.z -= 1
       dist = position.z - position.x / math.tan(-angle)
 
       print(f"Calculating diagonal. angle: {round(math.degrees(angle), 2)}  height: {round(dist, 2)}")
@@ -155,7 +170,7 @@ class Slice_Diagonals(Slice_Base):
       angle -= slice_angle_step
 
   def iterate_longest_rib(self):
-    rib = self.ribs.longest_element(self.ribs.plane)
+    rib = self.ribs.longest_element()
     #Part.show(rib, "rib")
     part_length = rib.Length / self.intersection_count
     rib_parts = rib.discretize(Distance = part_length)
@@ -362,7 +377,7 @@ class Plans:
 class Components:
   def __init__(self, doc, parent_name: str):
     self.doc = doc
-    group_profile = create_group(doc, f"{parent_name}__components")
+    group_components = create_group(doc, f"{parent_name}__components")
     all_ribs = {}
     rib_diagonal_intersections = {}
 
@@ -377,30 +392,100 @@ class Components:
     for rib in all_ribs.values():
       per_rib = []
       for rib_part in rib:
-        for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
-          for shape in shapes.OutList:
-            dist, vectors, _ = shape.Shape.distToShape(rib_part)
-            if dist < 0.1:
-              per_rib.append(vectors[0][0])
+        for diagonals in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
+          for diagonal in diagonals.OutList:
+            dist, vectors, _ = diagonal.Shape.distToShape(rib_part)
+            if dist < 0.01:
+              per_rib.append((vectors[0][0], diagonal.Shape))
+              continue
       if per_rib:
-        y_pos = str(round(per_rib[0].y)).replace("-", "m")
+        y_pos = str(round(per_rib[0][0].y)).replace("-", "m")
         rib_diagonal_intersections[y_pos] = per_rib
       
-    for y_pos, per_rib in rib_diagonal_intersections.items():
-      if len(per_rib):
-        print(y_pos, len(per_rib), len(all_ribs[y_pos]))
-        #for rib in all_ribs[y_pos]:
-        #  Part.show(rib)
+    for y_pos in all_ribs:
+      self.shape_rib(doc, y_pos, all_ribs[y_pos], rib_diagonal_intersections[y_pos], group_components)
 
   def index_ribs(self, shape, all_ribs):
     y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
     if y_pos not in all_ribs:
       all_ribs[y_pos] = []
 
-    all_ribs[y_pos].append(Part.Shape([shape]))
+    all_ribs[y_pos].append(shape)
 
+  def shape_rib(self, doc, rib_index, rib_shapes, diagonal_intersections, group):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    stringer_width = dimensions.get("stringer_width")
+    stringer_depth = dimensions.get("stringer_depth")
 
-  def add_rib(self, group_profile, shape, all_ribs):
+    new_shapes = []
+    intersections = []
+    lowest_point = None
+    highest_point = None
+    for edge in rib_shapes[0].Edges:
+      if lowest_point is None or edge.Vertexes[0].Point.z < lowest_point.z:
+        lowest_point = edge.Vertexes[0].Point
+      if lowest_point is None or edge.Vertexes[-1].Point.z < lowest_point.z:
+        lowest_point = edge.Vertexes[-1].Point
+
+      if highest_point is None or edge.Vertexes[0].Point.z > highest_point.z:
+        highest_point = edge.Vertexes[0].Point  
+        parameter = edge.Curve.parameter(highest_point)
+        highest_rib_vector_at_intersection = edge.Curve.tangent(parameter)[0]
+      if highest_point is None or edge.Vertexes[-1].Point.z > highest_point.z:
+        highest_point = edge.Vertexes[-1].Point
+        parameter = edge.Curve.parameter(highest_point)
+        highest_rib_vector_at_intersection = edge.Curve.tangent(parameter)[0]
+
+      for intersection, diagonal in diagonal_intersections:
+        edge_parameter = edge.Curve.parameter(intersection)
+        if edge_parameter > 0.0 and edge_parameter < 1.0:
+          diagonal_vector_at_intersection = self.diagonal_normal_at(diagonal, intersection)
+
+          rib_vector_at_intersection = edge.Curve.tangent(edge_parameter)[0]
+          intersections.append((intersection, rib_vector_at_intersection, diagonal_vector_at_intersection))
+
+    intersections.append((lowest_point, App.Vector(1, 0, 0), App.Vector(1, 0, 0)))
+    intersections.append((highest_point, highest_rib_vector_at_intersection, highest_rib_vector_at_intersection))
+
+    intersections.sort(key = lambda pair: pair[0].z)
+
+    last_outer_top = None
+
+    for intersection, rib_vector_at_intersection, diagonal_vector_at_intersection in intersections:
+      projection = diagonal_vector_at_intersection.cross(App.Vector(0, 1, 0)) * stringer_depth
+      outer_mid = intersection
+      #outer_top = intersection + diagonal_vector_at_intersection * stringer_width / 2
+      outer_top = intersection + rib_vector_at_intersection * stringer_width / 2
+      outer_bottom = intersection - rib_vector_at_intersection * stringer_width / 2
+      inner_top = intersection + diagonal_vector_at_intersection * stringer_width / 2 + projection
+      inner_bottom = intersection - diagonal_vector_at_intersection * stringer_width / 2 + projection
+
+      line = Part.makeLine(outer_top, inner_top)
+      new_shapes.append(Part.show(line, "top"))
+
+      line = Part.makeLine(outer_bottom, inner_bottom)
+      new_shapes.append(Part.show(line, "bottom"))
+
+      line = Part.makeLine(inner_top, inner_bottom)
+      new_shapes.append(Part.show(line, "projected"))
+
+      if last_outer_top is not None:
+        line = Part.makeLine(last_outer_top, outer_bottom)
+        new_shapes.append(Part.show(line, "join"))
+
+      last_outer_top = outer_top
+
+    group_component = create_group(doc, f"component_{rib_index}")
+    group_component.addObjects(new_shapes)
+    group.addObjects([group_component])
+
+  @classmethod
+  def diagonal_normal_at(cls, diagonal, point):
+    for diagonal_edge in diagonal.Edges:
+      return diagonal_edge.Curve.toShape().findPlane().Axis
+    return None
+
+  def add_rib(self, group_components, shape, all_ribs):
     y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
 
     new_shapes = []
@@ -420,7 +505,7 @@ class Components:
 
     part = create_group(doc, f"component_{y_pos}")
     part.addObjects(new_shapes)
-    group_profile.addObjects([part])
+    group_components.addObjects([part])
 
 
 def create_group(doc, name):
