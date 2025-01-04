@@ -216,6 +216,10 @@ class View_Wireframe_Base:
     self.hull_body = hull_body
     self.data = data
 
+    if not self._calculate():
+      remove_group(doc, self.wireframe_name)
+      return
+
     self.create_blank_sketch()
 
     for slice_index, slice in enumerate(self.data):
@@ -224,6 +228,22 @@ class View_Wireframe_Base:
     for shape in self.wireframe.OutList:
       FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).LineColor = self.colour
       FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).PointColor = self.colour
+
+    self._cleanup()
+
+  def _cleanup(self):
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(self.doc.Name, self.wireframe_name)
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    if int(dimensions.get("show_wireframe")):
+      Gui.runCommand('Std_ShowSelection', 0)
+    else:
+      Gui.runCommand('Std_HideSelection', 0)
+    print("*** show_wireframe", type(int(dimensions.get("show_wireframe"))), dimensions.get("show_wireframe"), self.wireframe_name)
+
+  def _calculate(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    return dimensions.get("calculate_wireframe")
 
   def create_blank_sketch(self):
     self.wireframe = create_group(self.doc, self.wireframe_name)
@@ -238,6 +258,7 @@ class View_Wireframe_Base:
 class View_Wireframe_Body(View_Wireframe_Base):
   plan_name = "plan_body"
   wireframe_name = "wireframe_body"
+
   plan_offset = App.Vector(+2000.0, 0.0, 0.0)
   colour_fore = (255, 0, 0)
   colour_aft = (255, 255, 0)
@@ -254,6 +275,25 @@ class View_Wireframe_Body(View_Wireframe_Base):
       FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).LineColor = self.colour_aft
       FreeCADGui.getDocument(self.doc.Name).getObject(shape.Name).PointColor = self.colour_aft
 
+    self._later_cleanup()
+
+  def _cleanup(self):
+    return
+
+  def _later_cleanup(self):
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(self.doc.Name, self.wireframe_fore.Name)
+    Gui.Selection.addSelection(self.doc.Name, self.wireframe_aft.Name)
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    if int(dimensions.get("show_wireframe")):
+      Gui.runCommand('Std_ShowSelection', 0)
+    else:
+      Gui.runCommand('Std_HideSelection', 0)
+    print("*** show_wireframe", type(int(dimensions.get("show_wireframe"))), dimensions.get("show_wireframe"), self.doc.Name, self.wireframe_fore.Name, self.wireframe_aft.Name)
+
+  def _calculate(self):
+    """ Always calculate this sub class. """
+    return True
 
   def create_blank_sketch(self):
     self.wireframe_fore = create_group(self.doc, f"{self.wireframe_name}_fore")
@@ -297,44 +337,71 @@ class Plans:
     self.doc = doc
     self.lowest_point = lowest_point
 
-    group_profile = create_group(doc, f"{parent_name}__plan_profile")
-    group_body = create_group(doc, f"{parent_name}__plan_body")
-    group_waterline = create_group(doc, f"{parent_name}__plan_waterline")
+    plan_profile_name = f"{parent_name}__plan_profile"
+    plan_body_name = f"{parent_name}__plan_body"
+    plan_waterline_name = f"{parent_name}__plan_waterline"
+
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    if not dimensions.get("calculate_plans"):
+      remove_group(self.doc, plan_profile_name)
+      remove_group(self.doc, plan_body_name)
+      remove_group(self.doc, plan_waterline_name)
+      return
+
+    group_profile = create_group(doc, plan_profile_name)
+    group_body = create_group(doc, plan_body_name)
+    group_waterline = create_group(doc, plan_waterline_name)
 
     offset_plan_profile = 1000
     offset_plan_body = 2000
     offset_plan_waterline = 3500
 
-    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_profile"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, True, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_profile"):
+      for shape in shapes.OutList:
+        self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, True, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
-    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, False)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
+      for shape in shapes.OutList:
+        self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, False)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
-    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
+      for shape in shapes.OutList:
+        self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, True, True)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
-    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_waterline"):
-      self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, False)
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_waterline"):
+      for shape in shapes.OutList:
+        self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, False)
 
-    for shape in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
-      self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, True)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
-      self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+    for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
+      for shape in shapes.OutList:
+        self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, True)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
+        self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
 
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(self.doc.Name, f"{parent_name}__plan_profile")
+    Gui.Selection.addSelection(self.doc.Name, f"{parent_name}__plan_body")
+    Gui.Selection.addSelection(self.doc.Name, f"{parent_name}__plan_waterline")
+    Gui.Selection.addSelection(self.doc.Name, f"{parent_name}__plan_diagonal")
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    if int(dimensions.get("show_plans")):
+      Gui.runCommand('Std_ShowSelection', 0)
+    else:
+      Gui.runCommand('Std_HideSelection', 0)
+    print("*** show_plans", type(dimensions.get("show_plans")), dimensions.get("show_plans"), f"{parent_name}__plan_body")
 
   def draw_line(self, shape, direction, x_pos, group, foreground: bool, mirror: bool):
     outline, _, _, _ = TechDraw.project(shape, direction)
@@ -375,11 +442,12 @@ class Plans:
 
 
 class Components:
-  def __init__(self, doc, parent_name: str):
+  def __init__(self, doc, parent_name: str, body, diagonals: Slice_Diagonals):
     self.doc = doc
     self.parent_name = parent_name
     self.group = create_group(doc, f"{parent_name}__components")
-    self.hull = self.doc.getObjectsByLabel(f"{parent_name}")[0].Shape
+    self.hull = body
+    self.diagonals = diagonals
     all_ribs = {}
     rib_diagonal_intersections = {}
 
@@ -404,28 +472,59 @@ class Components:
     all_ribs[y_pos].append(shape)
 
   def diagonal_normals(self):
-    for diagonals in self.doc.getObjectsByLabel(f"{self.parent_name}__wireframe_diagonal"):
-      for diagonal in diagonals.OutList:
-        yield (diagonal.Shape, self.diagonal_normal_at(diagonal.Shape, diagonal.Shape.Vertexes[0]))
+    for diagonal in self.diagonals:
+      shape = Part.Shape([diagonal])
+      yield (shape, self.diagonal_normal_at(shape, shape.Vertexes[0]))
 
   def stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
+    accurate_stringers = dimensions.get("accurate_stringers")
     new_shapes = []
     self.stringers = []
 
-    for d, normal in self.diagonal_normals():
-      pattern = d.copy().makeOffset2D(-stringer_depth, openResult = True, fill = True)
-      pattern.translate(normal.normalize() * stringer_width / 2)
-      stringer = pattern.extrude(-normal.normalize() * stringer_width)
-      #stringer = stringer.common((self.hull,), 0.075)
-      new_shapes.append(Part.show(stringer, "stringer"))
+    hull = self.hull.copy()
+    #hull.fixTolerance(5e-2)
+    hull.fixTolerance(1e-5)
+    #print(hull.fix(1e-6, 1e-6, 1e-6))
 
-      pattern_wide = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
-      pattern_wide = pattern_wide.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
-      pattern_wide.translate(normal.normalize() * stringer_width / 2)
-      self.stringers.append(pattern_wide.extrude(-normal.normalize() * stringer_width))
+    fatten = 0.1
+    for d, normal in self.diagonal_normals():
+      # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
+      # issues later due to faces being in the same place on identical planes.
+      pattern = d.copy().translate(normal.cross(-App.Vector(0, 1, 0)) * (fatten / 2))
+      pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
+      pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
+      stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
+      #stringer.fixTolerance(5e-2)
+      stringer.fixTolerance(1e-5)
+      #print(stringer.fix(1e-6, 1e-6, 1e-6))
+
+      # This deeper version of the stringer cuts the full notch out of the rib.
+      # Since the plane of each stringer's curve is at a different angle to the main
+      # hull it would be hard to calculate the correct shape for each notch.
+      # Instead, this stringer extends all the way out of the notch so we can do a boolean cut.
+      pattern_deep = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
+      pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
+      pattern_deep.translate(normal.normalize() * stringer_width / 2)
+      stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
+      self.stringers.append(stringer_deep)
+
+      if int(accurate_stringers):
+        # Since the main stringer's outer face is likely to be collinear with the hull's outer surface,
+        # bugs when performing the boolean operation to shape the outer face of the stringer to match
+        # the outer face of the hull.
+        # Instead we do the boolean operation with a copy of the deeper stringer,
+        # then a 2nd boolean operation between that and the proper stringer (that has the correct dimensions).
+        stringer_hull = stringer_deep.copy().common(hull)
+        stringer_hull.fixTolerance(1e-5)
+
+        # This knocks off the sharp corner of the stringer that protrudes through the hull surface.
+        # In real life, we'll use a plane.
+        stringer = stringer_hull.common(stringer)
+
+      new_shapes.append(Part.show(stringer, "stringer"))
 
     group_component = create_group(doc, f"stringers")
     group_component.addObjects(new_shapes)
@@ -466,6 +565,13 @@ class Components:
     for diagonal_edge in diagonal.Edges:
       return diagonal_edge.Curve.toShape().findPlane().Axis
     return None
+
+
+def remove_group(doc, name):
+  group = doc.getObjectsByLabel(name)
+  if group:
+    print(f"Removing previous sketch: {name}")
+    OpenSCADUtils.removesubtree(group)
 
 
 def create_group(doc, name):
@@ -563,7 +669,7 @@ if body:
 
   Plans(doc, body.Name, lowest_point)
 
-  Components(doc, body.Name)  
+  Components(doc, body.Name, body.Shape, data_xz)  
 
 else:
   print("No hull selected.")

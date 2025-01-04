@@ -155,15 +155,15 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height):
   start = App.Vector(0, keel_height.Z, 0)
   end = App.Vector(deck_plan.X, deck_height.Z, 0)
   vector = end - start
-  half_way = start + (vector / 2)
+  split = start + (99 * vector / 100)
 
   constraintList.append(Sketcher.Constraint('DistanceX', -1, 1, 0, 1, 0.0))
   constraintList.append(Sketcher.Constraint('DistanceY', 0, 1, keel_height.Z))
 
-  constraintList.append(Sketcher.Constraint('DistanceX', 0, 2, half_way.x))
-  constraintList.append(Sketcher.Constraint('DistanceY', 0, 2, half_way.y))
-  constraintList.append(Sketcher.Constraint('DistanceX', 1, 1, half_way.x))
-  constraintList.append(Sketcher.Constraint('DistanceY', 1, 1, half_way.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 0, 2, split.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 0, 2, split.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 1, 1, split.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 1, 1, split.y))
   
   constraintList.append(Sketcher.Constraint('DistanceX', 1, 2, deck_plan.X))
   constraintList.append(Sketcher.Constraint('DistanceY', 1, 2, deck_height.Z))
@@ -174,10 +174,10 @@ def simplify_section(sketch, z, deck_plan, deck_height, keel_height):
   constraintList.append(Sketcher.Constraint('DistanceX', -1, 1, 2, 1, 0.0))
   constraintList.append(Sketcher.Constraint('DistanceY', 2, 1, keel_height.Z))
 
-  constraintList.append(Sketcher.Constraint('DistanceX', 2, 2, -half_way.x))
-  constraintList.append(Sketcher.Constraint('DistanceY', 2, 2, half_way.y))
-  constraintList.append(Sketcher.Constraint('DistanceX', 3, 1, -half_way.x))
-  constraintList.append(Sketcher.Constraint('DistanceY', 3, 1, half_way.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 2, 2, -split.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 2, 2, split.y))
+  constraintList.append(Sketcher.Constraint('DistanceX', 3, 1, -split.x))
+  constraintList.append(Sketcher.Constraint('DistanceY', 3, 1, split.y))
   
   constraintList.append(Sketcher.Constraint('DistanceX', 3, 2, -deck_plan.X))
   constraintList.append(Sketcher.Constraint('DistanceY', 3, 2, deck_height.Z))
