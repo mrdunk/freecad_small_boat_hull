@@ -377,9 +377,13 @@ class Plans:
 class Components:
   def __init__(self, doc, parent_name: str):
     self.doc = doc
-    group_components = create_group(doc, f"{parent_name}__components")
+    self.parent_name = parent_name
+    self.group = create_group(doc, f"{parent_name}__components")
+    self.hull = self.doc.getObjectsByLabel(f"{parent_name}")[0].Shape
     all_ribs = {}
     rib_diagonal_intersections = {}
+
+    self.stringers()
 
     for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
       for shape in shapes.OutList:
@@ -389,21 +393,8 @@ class Components:
       for shape in shapes.OutList:
         self.index_ribs(shape.Shape, all_ribs)
 
-    for rib in all_ribs.values():
-      per_rib = []
-      for rib_part in rib:
-        for diagonals in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_diagonal"):
-          for diagonal in diagonals.OutList:
-            dist, vectors, _ = diagonal.Shape.distToShape(rib_part)
-            if dist < 0.01:
-              per_rib.append((vectors[0][0], diagonal.Shape))
-              continue
-      if per_rib:
-        y_pos = str(round(per_rib[0][0].y)).replace("-", "m")
-        rib_diagonal_intersections[y_pos] = per_rib
-      
     for y_pos in all_ribs:
-      self.shape_rib(doc, y_pos, all_ribs[y_pos], rib_diagonal_intersections[y_pos], group_components)
+      self.shape_rib(doc, y_pos, all_ribs[y_pos][0])
 
   def index_ribs(self, shape, all_ribs):
     y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
@@ -412,100 +403,69 @@ class Components:
 
     all_ribs[y_pos].append(shape)
 
-  def shape_rib(self, doc, rib_index, rib_shapes, diagonal_intersections, group):
+  def diagonal_normals(self):
+    for diagonals in self.doc.getObjectsByLabel(f"{self.parent_name}__wireframe_diagonal"):
+      for diagonal in diagonals.OutList:
+        yield (diagonal.Shape, self.diagonal_normal_at(diagonal.Shape, diagonal.Shape.Vertexes[0]))
+
+  def stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
-
     new_shapes = []
-    intersections = []
-    lowest_point = None
-    highest_point = None
-    for edge in rib_shapes[0].Edges:
-      if lowest_point is None or edge.Vertexes[0].Point.z < lowest_point.z:
-        lowest_point = edge.Vertexes[0].Point
-      if lowest_point is None or edge.Vertexes[-1].Point.z < lowest_point.z:
-        lowest_point = edge.Vertexes[-1].Point
+    self.stringers = []
 
-      if highest_point is None or edge.Vertexes[0].Point.z > highest_point.z:
-        highest_point = edge.Vertexes[0].Point  
-        parameter = edge.Curve.parameter(highest_point)
-        highest_rib_vector_at_intersection = edge.Curve.tangent(parameter)[0]
-      if highest_point is None or edge.Vertexes[-1].Point.z > highest_point.z:
-        highest_point = edge.Vertexes[-1].Point
-        parameter = edge.Curve.parameter(highest_point)
-        highest_rib_vector_at_intersection = edge.Curve.tangent(parameter)[0]
+    for d, normal in self.diagonal_normals():
+      pattern = d.copy().makeOffset2D(-stringer_depth, openResult = True, fill = True)
+      pattern.translate(normal.normalize() * stringer_width / 2)
+      stringer = pattern.extrude(-normal.normalize() * stringer_width)
+      #stringer = stringer.common((self.hull,), 0.075)
+      new_shapes.append(Part.show(stringer, "stringer"))
 
-      for intersection, diagonal in diagonal_intersections:
-        edge_parameter = edge.Curve.parameter(intersection)
-        if edge_parameter > 0.0 and edge_parameter < 1.0:
-          diagonal_vector_at_intersection = self.diagonal_normal_at(diagonal, intersection)
+      pattern_wide = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
+      pattern_wide = pattern_wide.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
+      pattern_wide.translate(normal.normalize() * stringer_width / 2)
+      self.stringers.append(pattern_wide.extrude(-normal.normalize() * stringer_width))
 
-          rib_vector_at_intersection = edge.Curve.tangent(edge_parameter)[0]
-          intersections.append((intersection, rib_vector_at_intersection, diagonal_vector_at_intersection))
-
-    intersections.append((lowest_point, App.Vector(1, 0, 0), App.Vector(1, 0, 0)))
-    intersections.append((highest_point, highest_rib_vector_at_intersection, highest_rib_vector_at_intersection))
-
-    intersections.sort(key = lambda pair: pair[0].z)
-
-    last_outer_top = None
-
-    for intersection, rib_vector_at_intersection, diagonal_vector_at_intersection in intersections:
-      projection = diagonal_vector_at_intersection.cross(App.Vector(0, 1, 0)) * stringer_depth
-      outer_mid = intersection
-      #outer_top = intersection + diagonal_vector_at_intersection * stringer_width / 2
-      outer_top = intersection + rib_vector_at_intersection * stringer_width / 2
-      outer_bottom = intersection - rib_vector_at_intersection * stringer_width / 2
-      inner_top = intersection + diagonal_vector_at_intersection * stringer_width / 2 + projection
-      inner_bottom = intersection - diagonal_vector_at_intersection * stringer_width / 2 + projection
-
-      line = Part.makeLine(outer_top, inner_top)
-      new_shapes.append(Part.show(line, "top"))
-
-      line = Part.makeLine(outer_bottom, inner_bottom)
-      new_shapes.append(Part.show(line, "bottom"))
-
-      line = Part.makeLine(inner_top, inner_bottom)
-      new_shapes.append(Part.show(line, "projected"))
-
-      if last_outer_top is not None:
-        line = Part.makeLine(last_outer_top, outer_bottom)
-        new_shapes.append(Part.show(line, "join"))
-
-      last_outer_top = outer_top
-
-    group_component = create_group(doc, f"component_{rib_index}")
+    group_component = create_group(doc, f"stringers")
     group_component.addObjects(new_shapes)
-    group.addObjects([group_component])
+    self.group.addObjects([group_component])
+
+  def shape_rib(self, doc, rib_index, rib_shape):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    stringer_width = dimensions.get("stringer_width")
+    stringer_depth = dimensions.get("stringer_depth")
+    rib_width = dimensions.get("rib_width")
+    rib_depth = dimensions.get("rib_depth")
+    new_shapes = []
+
+    if rib_shape.Length < 1:
+      return
+
+    try:
+      rib_face = rib_shape.makeOffset2D(-rib_depth, openResult = True, fill = True)
+    except:
+      return
+
+    rib_face.translate(-App.Vector(0, 1, 0) * rib_width / 2)
+
+    for stringer_wide in self.stringers:
+      rib_face = rib_face.cut(stringer_wide)
+
+    rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_width / 2)
+    rib_solid = rib_solid.common(self.hull)
+
+    new_shapes.append(Part.show(rib_solid))
+
+    group_component = create_group(doc, f"rib_{rib_index}")
+    group_component.addObjects(new_shapes)
+    self.group.addObjects([group_component])
 
   @classmethod
   def diagonal_normal_at(cls, diagonal, point):
     for diagonal_edge in diagonal.Edges:
       return diagonal_edge.Curve.toShape().findPlane().Axis
     return None
-
-  def add_rib(self, group_components, shape, all_ribs):
-    y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
-
-    new_shapes = []
-
-    new_wire = Part.Wire([shape.copy(), shape.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))])
-    new_shapes.append(Part.show(new_wire))
-
-    try:
-      offset = new_wire.makeOffset2D(-50, openResult = True, fill = True)
-      new_shapes.append(Part.show(offset))
-    except:
-      pass
-
-    if y_pos not in all_ribs:
-      all_ribs[y_pos] = []
-    all_ribs[y_pos] += new_shapes
-
-    part = create_group(doc, f"component_{y_pos}")
-    part.addObjects(new_shapes)
-    group_components.addObjects([part])
 
 
 def create_group(doc, name):
@@ -591,7 +551,7 @@ if body:
   data_y = Slice_Waterline(doc, body, intersection_count = 6)
   View_Wireframe_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(doc, body, intersection_count = 11, section_positions = [-1750, -1350, -900, -450, 0, 450, 900, 1350, 1750])
+  data_z = Slice_CrossSection(doc, body, intersection_count = 11, section_positions = [-1700, -1350, -900, -450, 0, 450, 900, 1350, 1700])
   #data_z = Slice_CrossSection(doc, body, intersection_count = 11)
   View_Wireframe_Body(body.Name, doc, body, data_z)
 
