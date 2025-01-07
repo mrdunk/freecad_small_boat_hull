@@ -19,7 +19,7 @@ class Slice_Base(list):
   lowest_point = 0
   section_positions = []
 
-  def __init__(self, doc, hull_body, intersection_count = 12, section_positions = []):
+  def __init__(self, doc, hull_body, intersection_count = None, section_positions = []):
     self.doc = doc
     self.hull_body = hull_body
     self.intersection_count = intersection_count
@@ -131,29 +131,36 @@ class Slice_Profile(Slice_Base):
 class Slice_Diagonals(Slice_Base):
   plane = App.Vector(1, 0, 1)
 
-  def __init__(self, doc, hull_body, ribs: Slice_CrossSection, intersection_count = 6):
+  def __init__(self, doc, hull_body, ribs: Slice_CrossSection, intersection_count = None, section_positions = []):
     self.ribs = ribs
-    super().__init__(doc, hull_body, intersection_count)
+    super().__init__(doc, hull_body, intersection_count, section_positions)
+
+  def _iterate_positions(self):
+    if self.section_positions:
+      for angle, dist in self.section_positions:
+        yield angle, dist
+    else:
+      assert self.intersection_count is not None
+      angle = 90
+      slice_angle_step = angle / self.intersection_count / 1.8
+
+      for _, position in self.iterate_longest_rib():
+        angle -= slice_angle_step
+        if angle <= 0:
+          break
+        dist = position.z - position.x / math.tan(math.radians(-angle))
+        yield angle, dist
 
   def slice(self):
     """
     The Diagonals don't follow the same pattern as the other perspectives.
     The plane changes angle with each slice.
     """
-    slice_angle_step = math.radians(90.0 / self.intersection_count / 1.8)
+    for angle, dist in self._iterate_positions():
+      print(f"Calculating diagonal. angle: {round(angle, 2)}  height: {round(dist, 2)}")
 
-    angle = math.radians(90) - slice_angle_step
-
-    for _, position in self.iterate_longest_rib():
-      if angle <= 0:
-        break
-
-      dist = position.z - position.x / math.tan(-angle)
-
-      print(f"Calculating diagonal. angle: {round(math.degrees(angle), 2)}  height: {round(dist, 2)}")
-
-      plane = App.Vector(math.cos(angle), 0, math.sin(angle))
-      slices = self.hull_body.Shape.slice(plane, math.sin(angle) * dist)
+      plane = App.Vector(math.cos(math.radians(angle)), 0, math.sin(math.radians(angle)))
+      slices = self.hull_body.Shape.slice(plane, math.sin(math.radians(angle)) * dist)
       if not slices:
         continue
 
@@ -166,8 +173,6 @@ class Slice_Diagonals(Slice_Base):
               longest = wire
           wires = [longest]
         self += wires
-
-      angle -= slice_angle_step
 
   def iterate_longest_rib(self):
     rib = self.ribs.longest_element()
@@ -239,7 +244,6 @@ class View_Wireframe_Base:
       Gui.runCommand('Std_ShowSelection', 0)
     else:
       Gui.runCommand('Std_HideSelection', 0)
-    print("*** show_wireframe", type(int(dimensions.get("show_wireframe"))), dimensions.get("show_wireframe"), self.wireframe_name)
 
   def _calculate(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -289,7 +293,6 @@ class View_Wireframe_Body(View_Wireframe_Base):
       Gui.runCommand('Std_ShowSelection', 0)
     else:
       Gui.runCommand('Std_HideSelection', 0)
-    print("*** show_wireframe", type(int(dimensions.get("show_wireframe"))), dimensions.get("show_wireframe"), self.doc.Name, self.wireframe_fore.Name, self.wireframe_aft.Name)
 
   def _calculate(self):
     """ Always calculate this sub class. """
@@ -401,7 +404,6 @@ class Plans:
       Gui.runCommand('Std_ShowSelection', 0)
     else:
       Gui.runCommand('Std_HideSelection', 0)
-    print("*** show_plans", type(dimensions.get("show_plans")), dimensions.get("show_plans"), f"{parent_name}__plan_body")
 
   def draw_line(self, shape, direction, x_pos, group, foreground: bool, mirror: bool):
     outline, _, _, _ = TechDraw.project(shape, direction)
@@ -442,52 +444,56 @@ class Plans:
 
 
 class Components:
+  stringers = []
+  ribs = {}
+
   def __init__(self, doc, parent_name: str, body, diagonals: Slice_Diagonals):
     self.doc = doc
     self.parent_name = parent_name
     self.group = create_group(doc, f"{parent_name}__components")
     self.hull = body
     self.diagonals = diagonals
-    all_ribs = {}
+    ribs_data = {}
     rib_diagonal_intersections = {}
+    self.rib_groups = {}
+    self.stringers_group = None
 
-    self.stringers()
+    self.draw_stringers()
+    self.draw_gunwale()
 
     for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_fore"):
       for shape in shapes.OutList:
-        self.index_ribs(shape.Shape, all_ribs)
+        self.index_ribs(shape.Shape, ribs_data)
 
     for shapes in self.doc.getObjectsByLabel(f"{parent_name}__wireframe_body_aft"):
       for shape in shapes.OutList:
-        self.index_ribs(shape.Shape, all_ribs)
+        self.index_ribs(shape.Shape, ribs_data)
 
-    for y_pos in all_ribs:
-      self.shape_rib(doc, y_pos, all_ribs[y_pos][0])
+    for y_pos in ribs_data:
+      self.draw_rib(doc, y_pos, ribs_data[y_pos][0])
 
-  def index_ribs(self, shape, all_ribs):
+    self.mirror_sides()
+
+  def index_ribs(self, shape, ribs_data):
     y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
-    if y_pos not in all_ribs:
-      all_ribs[y_pos] = []
+    if y_pos not in ribs_data:
+      ribs_data[y_pos] = []
 
-    all_ribs[y_pos].append(shape)
+    ribs_data[y_pos].append(shape)
 
   def diagonal_normals(self):
     for diagonal in self.diagonals:
       shape = Part.Shape([diagonal])
       yield (shape, self.diagonal_normal_at(shape, shape.Vertexes[0]))
 
-  def stringers(self):
+  def draw_stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
     accurate_stringers = dimensions.get("accurate_stringers")
-    new_shapes = []
-    self.stringers = []
+    self.stringers_deep = []
 
     hull = self.hull.copy()
-    #hull.fixTolerance(5e-2)
-    hull.fixTolerance(1e-5)
-    #print(hull.fix(1e-6, 1e-6, 1e-6))
 
     fatten = 0.1
     for d, normal in self.diagonal_normals():
@@ -497,9 +503,6 @@ class Components:
       pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
       pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
       stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
-      #stringer.fixTolerance(5e-2)
-      stringer.fixTolerance(1e-5)
-      #print(stringer.fix(1e-6, 1e-6, 1e-6))
 
       # This deeper version of the stringer cuts the full notch out of the rib.
       # Since the plane of each stringer's curve is at a different angle to the main
@@ -509,7 +512,6 @@ class Components:
       pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
       pattern_deep.translate(normal.normalize() * stringer_width / 2)
       stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
-      self.stringers.append(stringer_deep)
 
       if int(accurate_stringers):
         # Since the main stringer's outer face is likely to be collinear with the hull's outer surface,
@@ -518,47 +520,96 @@ class Components:
         # Instead we do the boolean operation with a copy of the deeper stringer,
         # then a 2nd boolean operation between that and the proper stringer (that has the correct dimensions).
         stringer_hull = stringer_deep.copy().common(hull)
-        stringer_hull.fixTolerance(1e-5)
 
         # This knocks off the sharp corner of the stringer that protrudes through the hull surface.
         # In real life, we'll use a plane.
         stringer = stringer_hull.common(stringer)
 
-      new_shapes.append(Part.show(stringer, "stringer"))
+      self.stringers.append(stringer)
+      self.stringers_deep.append(stringer_deep)
 
-    group_component = create_group(doc, f"stringers")
-    group_component.addObjects(new_shapes)
-    self.group.addObjects([group_component])
+    # set up the group to store the displayed stringers in later.
+    self.stringers_group = create_group(doc, f"stringers")
+    self.group.addObjects([self.stringers_group])
 
-  def shape_rib(self, doc, rib_index, rib_shape):
+  def draw_gunwale(self):
+    profile_deck = doc.getObjectsByLabel('profile_deck')[0]
+    plan_deck = doc.getObjectsByLabel('plan_deck')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    stringer_width = dimensions.get("stringer_width")
+    stringer_depth = dimensions.get("stringer_depth")
+
+    # Extrude deck_profile and deck_outline out to calculate meeting point at top
+    # of gunwale.
+    profile_extruded = profile_deck.Shape.extrude(App.Vector(1, 0, 0) * 1000)
+    plan_extruded = plan_deck.Shape.extrude(App.Vector(0, 0, 1) * 1000)
+    gunwale_wire = profile_extruded.section(plan_extruded)
+
+    gunwale_offset = gunwale_wire.copy().extrude(App.Vector(0, 0, 1) * -stringer_width)
+    gunwale_solid = gunwale_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth)
+    self.stringers.append(gunwale_solid)
+
+    gunwale_deep_wire = gunwale_wire.copy().translate(App.Vector(0, 0, 1) * stringer_width.Value)
+    gunwale_deep_wire = gunwale_deep_wire.translate(App.Vector(1, 0, 0) * stringer_depth.Value)
+    gunwale_deep_offset = gunwale_deep_wire.extrude(App.Vector(0, 0, 1) * -stringer_width.Value * 2)
+    gunwale_deep_solid = gunwale_deep_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth.Value * 2)
+    self.stringers_deep.append(gunwale_deep_solid)
+
+  def draw_rib(self, doc, rib_index, rib_shape):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
     rib_width = dimensions.get("rib_width")
     rib_depth = dimensions.get("rib_depth")
-    new_shapes = []
 
     if rib_shape.Length < 1:
       return
 
-    try:
+    if abs(rib_shape.BoundBox.XMax) > rib_depth * 2:
       rib_face = rib_shape.makeOffset2D(-rib_depth, openResult = True, fill = True)
-    except:
-      return
+    else:
+      # Too small to do offset. Just make a solid rib.
+      xmin = min(rib_shape.OrderedVertexes[0].X, rib_shape.OrderedVertexes[-1].X)
+      zmin = min(rib_shape.OrderedVertexes[0].Z, rib_shape.OrderedVertexes[-1].Z)
+      xmax = max(rib_shape.OrderedVertexes[0].X, rib_shape.OrderedVertexes[-1].X)
+      zmax = max(rib_shape.OrderedVertexes[0].Z, rib_shape.OrderedVertexes[-1].Z)
+      y = rib_shape.OrderedVertexes[0].Y
+
+      edge_top = Part.makeLine((xmax, y, zmax), (0, y, zmax))
+      edge_center = Part.makeLine((0, y, zmax), (0, y, zmin))
+      wire = Part.Wire([rib_shape, edge_top, edge_center])
+      rib_face = Part.Face(wire)
 
     rib_face.translate(-App.Vector(0, 1, 0) * rib_width / 2)
 
-    for stringer_wide in self.stringers:
-      rib_face = rib_face.cut(stringer_wide)
+    for stringer_deep in self.stringers_deep:
+      print("removing from rib", rib_index, stringer_deep, stringer_deep.TypeId)
+      for solid in stringer_deep.Solids:
+        rib_face = rib_face.cut(solid)
 
-    rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_width / 2)
+    rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_width)
     rib_solid = rib_solid.common(self.hull)
 
-    new_shapes.append(Part.show(rib_solid))
+    self.ribs[rib_index] = rib_solid
 
+    # set up the group to store the displayed ribs in later.
     group_component = create_group(doc, f"rib_{rib_index}")
-    group_component.addObjects(new_shapes)
     self.group.addObjects([group_component])
+    self.rib_groups[rib_index] = group_component
+
+  def mirror_sides(self):
+    for rib_index, rib in self.ribs.items():
+      print(rib_index, rib)
+      rib_mirrored = rib.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+      rib = rib.fuse(rib_mirrored)
+      rib = rib.removeSplitter()
+      self.rib_groups[rib_index].addObjects([Part.show(rib)])
+
+    for stringer in self.stringers:
+      print(stringer)
+      stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+      #stringer = stringer.fuse(stringer_mirrored)
+      self.stringers_group.addObjects([Part.show(stringer), Part.show(stringer_mirrored)])
 
   @classmethod
   def diagonal_normal_at(cls, diagonal, point):
@@ -657,11 +708,13 @@ if body:
   data_y = Slice_Waterline(doc, body, intersection_count = 6)
   View_Wireframe_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(doc, body, intersection_count = 11, section_positions = [-1700, -1350, -900, -450, 0, 450, 900, 1350, 1700])
+  data_z = Slice_CrossSection(doc, body, section_positions = [-1700, -1350, -900, -450, 0, 450, 900, 1350, 1700])
   #data_z = Slice_CrossSection(doc, body, intersection_count = 11)
   View_Wireframe_Body(body.Name, doc, body, data_z)
 
-  data_xz = Slice_Diagonals(doc, body, data_z, intersection_count = 5)
+  #data_xz = Slice_Diagonals(doc, body, data_z, section_positions = [(80, 405.81), (70, 368.50), (60, 326.82), (50, 275.94), (40, 188.63), (30, 0.0)])
+  data_xz = Slice_Diagonals(doc, body, data_z, section_positions = [(70, 360), (59, 326.82), (48, 275.94), (35, 188.63), (20, 0.0)])
+  #data_xz = Slice_Diagonals(doc, body, data_z, intersection_count = 5)
   View_Wireframe_Diagonals(body.Name, doc, body, data_xz)
 
   lowest_point = min(data_x.lowest_point, data_y.lowest_point)
@@ -673,6 +726,9 @@ if body:
 
 else:
   print("No hull selected.")
+
+Gui.Selection.clearSelection()
+Gui.Selection.addSelection(doc.Name, body.Name)
 
 pr.disable()
 pr.dump_stats("profile.cprof")
