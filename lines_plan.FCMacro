@@ -37,14 +37,8 @@ class Slice_Base(list):
     self.slice_width = slice_range / (self.intersection_count + 1)
 
   def slice(self):
-
     if not self.section_positions:
       self._setup_section_positions()
-
-      self.section_positions = [
-            self.slice_start + (i * self.slice_width) + 0.1
-            for i in range(self.intersection_count + 1)
-          ]
 
     slices = self.hull_body.Shape.slices(self.plane, self.section_positions)
     print(f"{len(slices.Wires)} sections drawn for the {self.plane} axis")
@@ -88,14 +82,9 @@ class Slice_CrossSection(Slice_Base):
   def _setup_section_positions(self):
     bound_box = self.hull_body.Shape.BoundBox
 
-    self.slice_start = bound_box.YMin
-    slice_range = bound_box.YLength
-    self.slice_width = slice_range / (self.intersection_count + 1)
-
-  def _setup_section_positions(self):
-    bound_box = self.hull_body.Shape.BoundBox
-
-    if not self.section_positions:
+    if self.section_positions:
+      pass
+    elif self.intersection_count:
       slice_range = bound_box.YLength
       slice_width = slice_range / (self.intersection_count + 1)
       slice_end = bound_box.YMax - slice_width / 4
@@ -103,6 +92,22 @@ class Slice_CrossSection(Slice_Base):
       self.slice_start = bound_box.YMin + slice_width / 4 + 1
       self.slice_width = abs(self.slice_start - slice_end) / (self.intersection_count - 1)
 
+      self.section_positions = [
+            self.slice_start + (i * self.slice_width) + 0.1
+            for i in range(self.intersection_count + 1)
+          ]
+    else:
+      dimensions = doc.getObjectsByLabel("dimensions")[0]
+      index = 0
+      self.section_positions = []
+      while True:
+        rib_pos_label = f"rib_positions_{index}"
+        try:
+          rib_position = dimensions.get(rib_pos_label)
+        except ValueError:
+          break
+        self.section_positions.append(rib_position)
+        index += 1
 
 class Slice_Waterline(Slice_Base):
   plane = App.Vector(0, 0, 1)
@@ -115,10 +120,9 @@ class Slice_Waterline(Slice_Base):
     self.slice_width = slice_range / (self.intersection_count + 1)
 
 
-
 class Slice_Profile(Slice_Base):
   plane = App.Vector(1, 0, 0)
-  
+
   def _setup_section_positions(self):
     bound_box = self.hull_body.Shape.BoundBox
 
@@ -136,6 +140,22 @@ class Slice_Diagonals(Slice_Base):
     super().__init__(doc, hull_body, intersection_count, section_positions)
 
   def _iterate_positions(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+
+    if not self.section_positions and not self.intersection_count:
+      index = 0
+      self.section_positions = []
+      while True:
+        angle_label = f"diagonal_angles_{index}"
+        height_label = f"diagonal_heights_{index}"
+        try:
+          diagonal_angle = dimensions.get(angle_label)
+          diagonal_height = dimensions.get(height_label)
+        except ValueError:
+          break
+        self.section_positions.append((diagonal_angle, diagonal_height))
+        index += 1
+
     if self.section_positions:
       for angle, dist in self.section_positions:
         yield angle, dist
@@ -469,13 +489,17 @@ class Components:
       for shape in shapes.OutList:
         self.index_ribs(shape.Shape, ribs_data)
 
-    for y_pos in ribs_data:
-      self.draw_rib(doc, y_pos, ribs_data[y_pos][0])
+    for rib_index, y_pos in enumerate(sorted(ribs_data.keys(), key = lambda val: int(val))):
+      self.draw_rib(doc, y_pos, rib_index, ribs_data[y_pos][0])
 
     self.mirror_sides()
 
+    self.draw_stem()
+    self.draw_stern()
+    self.draw_keelson()
+
   def index_ribs(self, shape, ribs_data):
-    y_pos = str(round(shape.BoundBox.YMin)).replace("-", "m")
+    y_pos = str(round(shape.BoundBox.YMin))
     if y_pos not in ribs_data:
       ribs_data[y_pos] = []
 
@@ -555,18 +579,54 @@ class Components:
     gunwale_deep_solid = gunwale_deep_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth.Value * 2)
     self.stringers_deep.append(gunwale_deep_solid)
 
-  def draw_rib(self, doc, rib_index, rib_shape):
+  def draw_rib(self, doc, rib_position, rib_index, rib_shape):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
     rib_width = dimensions.get("rib_width")
     rib_depth = dimensions.get("rib_depth")
+    thwart_height = dimensions.get("thwart_height")
+    deck_width = dimensions.get("deck_width")
+    rib_type = dimensions.get(f"rib_type_{rib_index}")
+    print(rib_position, rib_index, rib_type)
 
     if rib_shape.Length < 1:
       return
 
     if abs(rib_shape.BoundBox.XMax) > rib_depth * 2:
-      rib_face = rib_shape.makeOffset2D(-rib_depth, openResult = True, fill = True)
+      rib_face = rib_shape.copy().makeOffset2D(-rib_depth, openResult = True, fill = True)
+
+      if rib_type == "thwart":
+        rib_intersection_height = Part.makeLine(
+            App.Vector(deck_width.Value, float(rib_position), thwart_height.Value),
+            App.Vector(0.0, float(rib_position), thwart_height.Value)
+        )
+        rib_intersection_bottom = Part.makeLine(
+            App.Vector(rib_depth.Value / 2, float(rib_position), thwart_height.Value),
+            App.Vector(rib_depth.Value / 2, float(rib_position), 0.0)
+        )
+
+        thwart = None
+        brace = None
+
+        for edge in rib_shape.Edges:
+          common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
+          for point in common:
+            thwart = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height.Value))
+
+          common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
+          for point in common:
+            brace = Part.makeLine(point, App.Vector(rib_depth.Value / 2, float(rib_position), thwart_height.Value))
+
+        if thwart:
+          thwart_face = thwart.extrude(App.Vector(0, 0, 1) * rib_depth.Value)
+          thwart_solid = thwart_face.extrude(App.Vector(0, 1, 0) * rib_width.Value)
+          rib_face = rib_face.fuse(thwart_face)
+
+        if brace:
+          brace_face = brace.extrude(App.Vector(1, 0, 0) * -rib_depth.Value)
+          brace_solid = brace_face.extrude(App.Vector(0, 1, 0) * rib_width.Value)
+          rib_face = rib_face.fuse(brace_face)
     else:
       # Too small to do offset. Just make a solid rib.
       xmin = min(rib_shape.OrderedVertexes[0].X, rib_shape.OrderedVertexes[-1].X)
@@ -583,27 +643,94 @@ class Components:
     rib_face.translate(-App.Vector(0, 1, 0) * rib_width / 2)
 
     for stringer_deep in self.stringers_deep:
-      print("removing from rib", rib_index, stringer_deep, stringer_deep.TypeId)
+      print("removing from rib", rib_position, stringer_deep, stringer_deep.TypeId)
       for solid in stringer_deep.Solids:
         rib_face = rib_face.cut(solid)
 
     rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_width)
     rib_solid = rib_solid.common(self.hull)
 
-    self.ribs[rib_index] = rib_solid
+    self.ribs[rib_position] = rib_solid
 
     # set up the group to store the displayed ribs in later.
-    group_component = create_group(doc, f"rib_{rib_index}")
+    group_component = create_group(doc, f"rib_{rib_position}")
     self.group.addObjects([group_component])
-    self.rib_groups[rib_index] = group_component
+    self.rib_groups[rib_position] = group_component
+
+  def draw_stem(self):
+    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    deck_length = dimensions.get("deck_length")
+    prow_height = dimensions.get("prow_height")
+    keelson_length = dimensions.get("keelson_length")
+    stem_depth = dimensions.get("stem_depth")
+    stem_overlap = dimensions.get("stem_overlap")
+    rib_width = dimensions.get("rib_width")
+    stem_length = (deck_length - keelson_length) / 2 + stem_overlap
+
+    box = Part.makeBox(2, stem_length, prow_height, App.Vector(-1, -deck_length / 2, 0), App.Vector(0, 0, 1))
+    section = box.common(profile_keel.Shape)
+    section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
+
+    offset = section.makeOffset2D(stem_depth, openResult = True, fill = True)
+    offset = offset.extrude(App.Vector(1, 0, 0) * rib_width)
+
+    group_component = create_group(doc, f"stem")
+    self.group.addObjects([group_component])
+    group_component.addObjects([ Part.show(offset) ])
+
+  def draw_stern(self):
+    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    deck_length = dimensions.get("deck_length")
+    prow_height = dimensions.get("prow_height")
+    keelson_length = dimensions.get("keelson_length")
+    stem_overlap = dimensions.get("stem_overlap")
+    stem_depth = dimensions.get("stem_depth")
+    rib_width = dimensions.get("rib_width")
+    stern_length = (deck_length - keelson_length) / 2 + stem_overlap
+
+    box = Part.makeBox(2, stern_length, prow_height, App.Vector(-1, deck_length / 2 - stern_length, 0), App.Vector(0, 0, 1))
+    section = box.common(profile_keel.Shape)
+    section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
+
+    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
+    offset = offset.extrude(App.Vector(1, 0, 0) * rib_width)
+
+    group_component = create_group(doc, f"stern")
+    self.group.addObjects([group_component])
+    group_component.addObjects([ Part.show(offset) ])
+
+  def draw_keelson(self):
+    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    prow_height = dimensions.get("prow_height")
+    keelson_length = dimensions.get("keelson_length")
+    keelson_width = dimensions.get("keelson_width")
+    keelson_depth = dimensions.get("keelson_depth")
+    accurate_stringers = dimensions.get("accurate_stringers")
+
+    box = Part.makeBox(2, keelson_length, prow_height, App.Vector(-1, -keelson_length / 2, 0), App.Vector(0, 0, 1))
+    section = box.common(profile_keel.Shape)
+    section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
+
+    offset = section.makeOffset2D(keelson_width, openResult = True, fill = True)
+    offset = offset.extrude(App.Vector(0, 0, 1) * keelson_depth)
+
+    if int(accurate_stringers) or True:
+      offset = offset.common(self.hull)
+
+    group_component = create_group(doc, f"keelson")
+    self.group.addObjects([group_component])
+    group_component.addObjects([ Part.show(offset) ])
 
   def mirror_sides(self):
-    for rib_index, rib in self.ribs.items():
-      print(rib_index, rib)
+    for rib_position, rib in self.ribs.items():
+      print(rib_position, rib)
       rib_mirrored = rib.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       rib = rib.fuse(rib_mirrored)
       rib = rib.removeSplitter()
-      self.rib_groups[rib_index].addObjects([Part.show(rib)])
+      self.rib_groups[rib_position].addObjects([Part.show(rib)])
 
     for stringer in self.stringers:
       print(stringer)
@@ -708,12 +835,13 @@ if body:
   data_y = Slice_Waterline(doc, body, intersection_count = 6)
   View_Wireframe_Waterline(body.Name, doc, body, data_y)
 
-  data_z = Slice_CrossSection(doc, body, section_positions = [-1700, -1350, -900, -450, 0, 450, 900, 1350, 1700])
+  data_z = Slice_CrossSection(doc, body)
+  #data_z = Slice_CrossSection(doc, body, section_positions = [-1700, -1350, -900, -450, 0, 450, 900, 1350, 1700])
   #data_z = Slice_CrossSection(doc, body, intersection_count = 11)
   View_Wireframe_Body(body.Name, doc, body, data_z)
 
-  #data_xz = Slice_Diagonals(doc, body, data_z, section_positions = [(80, 405.81), (70, 368.50), (60, 326.82), (50, 275.94), (40, 188.63), (30, 0.0)])
-  data_xz = Slice_Diagonals(doc, body, data_z, section_positions = [(70, 360), (59, 326.82), (48, 275.94), (35, 188.63), (20, 0.0)])
+  data_xz = Slice_Diagonals(doc, body, data_z)
+  #data_xz = Slice_Diagonals(doc, body, data_z, section_positions = [(70, 360), (59, 326.82), (48, 275.94), (35, 188.63)])
   #data_xz = Slice_Diagonals(doc, body, data_z, intersection_count = 5)
   View_Wireframe_Diagonals(body.Name, doc, body, data_xz)
 
@@ -722,7 +850,7 @@ if body:
 
   Plans(doc, body.Name, lowest_point)
 
-  Components(doc, body.Name, body.Shape, data_xz)  
+  Components(doc, body.Name, body.Shape, data_xz)
 
 else:
   print("No hull selected.")

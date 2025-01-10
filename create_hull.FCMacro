@@ -4,7 +4,7 @@
 import pdb
 import math
 import time
-import cProfile
+#import cProfile
 
 import FreeCAD as App
 import Part
@@ -304,16 +304,16 @@ def get_intersection(sketch, plane, pos):
 
 
 start = time.perf_counter()
-pr = cProfile.Profile()
-pr.enable()
+#pr = cProfile.Profile()
+#pr.enable()
 
 doc, body, body_hollow, hull_index, plane= start_()
 cross_sections = make_hull_sections(doc, body, hull_index, plane)
 draw(cross_sections, hull_index, body)
 draw_hollow(cross_sections, hull_index, body_hollow, plane)
 
-pr.disable()
-pr.dump_stats("profile.cprof")
+#pr.disable()
+#pr.dump_stats("profile.cprof")
 end = time.perf_counter()
 print(f"Took {end - start} seconds")
 
