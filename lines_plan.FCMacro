@@ -5,12 +5,12 @@ import math
 import time
 import cProfile
 
-import Draft
 import FreeCADGui
 import OpenSCADUtils
 import TechDraw
 import Part
 import DraftGeomUtils
+import draftgeoutils
 from FreeCAD import Units
 
 class Slice_Base(list):
@@ -579,7 +579,7 @@ class Components:
     gunwale_deep_solid = gunwale_deep_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth.Value * 2)
     self.stringers_deep.append(gunwale_deep_solid)
 
-  def draw_rib(self, doc, rib_position, rib_index, rib_shape):
+  def draw_rib(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
@@ -588,13 +588,68 @@ class Components:
     thwart_height = dimensions.get("thwart_height")
     deck_width = dimensions.get("deck_width")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
-    print(rib_position, rib_index, rib_type)
+    print("New rib:", rib_position, rib_index, rib_type)
 
-    if rib_shape.Length < 1:
+    if rib_wire.Length < 1:
       return
 
-    if abs(rib_shape.BoundBox.XMax) > rib_depth * 2:
-      rib_face = rib_shape.copy().makeOffset2D(-rib_depth, openResult = True, fill = True)
+    # Get shapes of intersections between stringer and rib.
+    plane = Part.Plane(App.Vector(0, int(rib_position), 0), App.Vector(0, 1, 0))
+    stringers_intersection = []
+    for stringer_deep in sorted(self.stringers_deep, key=lambda stringer : stringer.distToShape(Part.Vertex(0, 0, 0)), reverse=True):
+      stringers_intersection.append(stringer_deep.common(plane))
+      #Part.show(stringers_intersection[-1], "stringer_intersection")
+
+    # Work out which parts of rib outline are between stringers.
+    rib_wire_vertexes = sorted(rib_wire.copy().OrderedVertexes, key=lambda vertex : vertex.distToShape(Part.Vertex(0, 0, 0)), reverse=True)
+    top_outer = rib_wire_vertexes[0]
+    bottom_center = rib_wire_vertexes[-1]
+    deck = Part.makeLine(top_outer.Point, top_outer.Point - App.Vector(deck_width.Value, 0.0, 0.0))
+
+    rib_wire_with_deck = rib_wire.copy()
+    rib_wire_with_deck.add(deck)
+    rib_parts = rib_wire_with_deck.common(stringers_intersection)
+
+    # Calculate a new rib outline, curving parts between stringers away from hull's skin.
+    previous = bottom_center.Point
+    new_rib_parts = []
+    for rib_part in rib_parts.Edges:
+      if previous is None:
+        # First time through.
+        previous = rib_part.Vertexes[-1].Point
+        new_rib_parts.append(rib_part)
+        continue
+
+      vertex = rib_part.Vertexes[0].Point
+      if previous == vertex:
+        # Sections are separate edges.
+        previous = rib_part.Vertexes[-1].Point
+        new_rib_parts.append(rib_part)
+        continue
+
+      diff = (vertex - previous).normalize() * 20
+      cross = (diff / 2).cross(App.Vector(0, 1, 0))
+      new = (previous + vertex) / 2 + cross
+      arc = Part.Arc(previous, new, vertex).toShape()
+      previous = rib_part.Vertexes[-1].Point
+      new_rib_parts.append(arc)
+      new_rib_parts.append(rib_part)
+    outer_rib_wire = Part.Wire(new_rib_parts)
+    #Part.show(outer_rib_wire, "outer_rib_wire")
+
+    inner_rib_wire = rib_wire.copy().makeOffset2D(-rib_depth, openResult = True, fill = False)
+    inner_rib_wire = simplify_arcs(inner_rib_wire)
+
+    if abs(rib_wire.BoundBox.XMax) > rib_depth * 2:
+      outer_ends = get_wire_ends(outer_rib_wire)
+      inner_ends = get_wire_ends(inner_rib_wire)
+      bottom = Part.makeLine(outer_ends[0], inner_ends[0])
+      top = Part.makeLine(inner_ends[1], outer_ends[1])
+      inner_rib_wire.add(top)
+      inner_rib_wire.add(bottom)
+      rib_wire = Part.Wire([inner_rib_wire, outer_rib_wire], closed = True)
+      #Part.show(rib_wire, "rib_wire")
+      rib_face = Part.Face(rib_wire)
 
       if rib_type == "thwart":
         rib_intersection_height = Part.makeLine(
@@ -606,49 +661,84 @@ class Components:
             App.Vector(rib_depth.Value / 2, float(rib_position), 0.0)
         )
 
-        thwart = None
-        brace = None
+        thwart_edge = None
+        brace_edge = None
 
-        for edge in rib_shape.Edges:
+        for edge in rib_wire.Edges:
           common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
           for point in common:
-            thwart = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height.Value))
+            thwart_edge = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height.Value))
 
           common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
           for point in common:
-            brace = Part.makeLine(point, App.Vector(rib_depth.Value / 2, float(rib_position), thwart_height.Value))
+            brace_edge = Part.makeLine(point, App.Vector(rib_depth.Value / 2, float(rib_position), thwart_height.Value))
 
-        if thwart:
-          thwart_face = thwart.extrude(App.Vector(0, 0, 1) * rib_depth.Value)
-          thwart_solid = thwart_face.extrude(App.Vector(0, 1, 0) * rib_width.Value)
+        if thwart_edge:
+          thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * rib_depth.Value)
           rib_face = rib_face.fuse(thwart_face)
 
-        if brace:
-          brace_face = brace.extrude(App.Vector(1, 0, 0) * -rib_depth.Value)
-          brace_solid = brace_face.extrude(App.Vector(0, 1, 0) * rib_width.Value)
+        if brace_edge:
+          brace_face = brace_edge.extrude(App.Vector(1, 0, 0) * -rib_depth.Value / 2)
           rib_face = rib_face.fuse(brace_face)
+
+        rib_face = DraftGeomUtils.concatenate(rib_face)
+
+
+        shortest_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[0]
+        Part.show(shortest_wire, "shortest_wire")
+        offset = shortest_wire.makeOffset2D(-20, openResult = True, fill = False)
+        offset = Part.Wire(offset.Edges, closed=True)
+        Part.show(offset, "offset")
+
+        """
+        #to_chamfer = []
+        for edge in shortest_wire.Edges:
+        #  to_chamfer.append(Part.makeLine(edge.valueAt(edge.FirstParameter), edge.valueAt(edge.LastParameter)))
+          print(edge.TypeId, edge.Curve.TypeId)
+          print(edge.Curve.toShape().Curve)
+          try:
+            print(edge.Curve.toShape().Curve.BasisCurve)
+            Part.show(edge.Curve.toShape().Curve.BasisCurve.toShape(), "curve")
+            print("~~~~")
+          except:
+            pass
+        #to_chamfer.append(to_chamfer[0])
+
+        to_chamfer = shortest_wire.Edges
+        chamfers = []
+        last_edge = None
+        for edge in to_chamfer:
+          if last_edge is None:
+            last_edge = edge
+            continue
+          print(last_edge, edge)
+          chamfers.append(DraftGeomUtils.fillet([last_edge, edge], 10.0))
+          last_edge = edge
+
+          Part.show(chamfers[-1][1], "chamfer")
+      """
     else:
       # Too small to do offset. Just make a solid rib.
-      xmin = min(rib_shape.OrderedVertexes[0].X, rib_shape.OrderedVertexes[-1].X)
-      zmin = min(rib_shape.OrderedVertexes[0].Z, rib_shape.OrderedVertexes[-1].Z)
-      xmax = max(rib_shape.OrderedVertexes[0].X, rib_shape.OrderedVertexes[-1].X)
-      zmax = max(rib_shape.OrderedVertexes[0].Z, rib_shape.OrderedVertexes[-1].Z)
-      y = rib_shape.OrderedVertexes[0].Y
+      xmin = min(outer_rib_wire.OrderedVertexes[0].X, outer_rib_wire.OrderedVertexes[-1].X)
+      zmin = min(outer_rib_wire.OrderedVertexes[0].Z, outer_rib_wire.OrderedVertexes[-1].Z)
+      xmax = max(outer_rib_wire.OrderedVertexes[0].X, outer_rib_wire.OrderedVertexes[-1].X)
+      zmax = max(outer_rib_wire.OrderedVertexes[0].Z, outer_rib_wire.OrderedVertexes[-1].Z)
+      y = outer_rib_wire.OrderedVertexes[0].Y
 
       edge_top = Part.makeLine((xmax, y, zmax), (0, y, zmax))
       edge_center = Part.makeLine((0, y, zmax), (0, y, zmin))
-      wire = Part.Wire([rib_shape, edge_top, edge_center])
+      wire = Part.Wire([outer_rib_wire, edge_top, edge_center])
       rib_face = Part.Face(wire)
 
+    rib_face = rib_face.common(self.hull)
     rib_face.translate(-App.Vector(0, 1, 0) * rib_width / 2)
 
     for stringer_deep in self.stringers_deep:
-      print("removing from rib", rib_position, stringer_deep, stringer_deep.TypeId)
+      #print("removing from rib", rib_position, stringer_deep, stringer_deep.TypeId)
       for solid in stringer_deep.Solids:
         rib_face = rib_face.cut(solid)
 
     rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_width)
-    rib_solid = rib_solid.common(self.hull)
 
     self.ribs[rib_position] = rib_solid
 
@@ -753,10 +843,10 @@ def remove_group(doc, name):
 
 
 def create_group(doc, name):
-  print(f"Checking for: {name}")
+  #print(f"Checking for: {name}")
   group = doc.getObjectsByLabel(name)
   if group:
-    print(f"Removing previous sketch: {name}")
+    #print(f"Removing previous sketch: {name}")
     OpenSCADUtils.removesubtree(group)
 
   return doc.addObject('App::DocumentObjectGroup', name)
@@ -768,7 +858,7 @@ def get_body():
 
   selected_object = selected_objects[0]
   if selected_object.TypeId == "PartDesign::Body":
-    if "__plan_" in selected_object.Name:
+    if "__" in selected_object.Name:
       original_name = selected_object.Name.split("__plan_")[0]
       selected_object = doc.getObjectsByLabel(original_name)[0]
     return selected_object
@@ -815,10 +905,44 @@ def perpendicular(wire, position):
         print(round(z, 2))
 
         #Part.show(Part.makeLine(position, App.Vector(0, 0, z)),  "line")
-        #Part.show(Part.makeLine(position, position + vector.normalize() * 500),  "line")
+        #Part.show(Part.makeLine(position, position + vector.normalize() * 500), "line")
 
         return (angle, z)
   return None
+
+def get_wire_ends(wire):
+  """ Gets ends of a wire. Returns a list of any vertexes in a wire with only one connection. """
+  points = {}
+  for edge in wire.Edges:
+    first = edge.firstVertex().Point
+    first_hash = (first.x, first.y, first.z)
+    if first_hash not in points:
+      points[first_hash] = 0
+    points[first_hash] += 1
+
+    last = edge.lastVertex().Point
+    last_hash = (last.x, last.y, last.z)
+    if last_hash not in points:
+      points[last_hash] = 0
+    points[last_hash] += 1
+
+  ends = []
+  for point, count in points.items():
+    if count == 1:
+      ends.append(App.Vector(point))
+  return sorted(ends, key=lambda point: point.z)
+
+def simplify_arcs(wire: Part.Wire) -> Part.Wire:
+  """ Rewrite any Part::GeomOffsetCurve shapes as simple Arc and Lines."""
+  modified_edges = []
+  for edge in wire.Edges:
+    if edge.Curve.TypeId == "Part::GeomOffsetCurve":
+      for new in edge.Curve.toBSpline().toBiArcs(0.001):
+        modified_edges.append(new.toShape())
+    else:
+      modified_edges.append(edge)
+  modified_edges = Part.sortEdges(modified_edges)[0]
+  return Part.Wire(modified_edges)
 
 
 doc = App.ActiveDocument
@@ -862,4 +986,3 @@ pr.disable()
 pr.dump_stats("profile.cprof")
 end = time.perf_counter()
 print(f"Took {end - start} seconds")
-
