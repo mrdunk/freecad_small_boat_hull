@@ -5,6 +5,7 @@ import math
 import time
 import cProfile
 
+import Draft
 import FreeCADGui
 import OpenSCADUtils
 import TechDraw
@@ -380,7 +381,7 @@ class Plans:
     offset_plan_waterline = 3500
 
     label = f"{parent_name}__wireframe_profile"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, True, False)
@@ -390,7 +391,7 @@ class Plans:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     label = f"{parent_name}__wireframe_body_fore"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
@@ -399,7 +400,7 @@ class Plans:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     label = f"{parent_name}__wireframe_body_aft"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
@@ -408,7 +409,7 @@ class Plans:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, False, True)
 
     label = f"{parent_name}__wireframe_waterline"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.draw_line(shape.Shape, App.Vector(1, 0, 0), offset_plan_profile, group_profile, False, False)
@@ -417,7 +418,7 @@ class Plans:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, False)
 
     label = f"{parent_name}__wireframe_diagonal"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, True)
@@ -476,6 +477,8 @@ class Plans:
 class Components:
   stringers = []
   ribs = {}
+  components_flat = {}
+  components_bulk = {}
 
   def __init__(self, doc, parent_name: str, body, diagonals: Slice_Diagonals):
     self.doc = doc
@@ -496,13 +499,13 @@ class Components:
     self.draw_keelson()
 
     label = f"{parent_name}__wireframe_body_fore"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.index_ribs(shape.Shape, ribs_data)
 
     label = f"{parent_name}__wireframe_body_aft"
-    if has_group_by_label(doc, label):
+    if has_object_by_label(doc, label):
       for shapes in self.doc.getObjectsByLabel(label):
         for shape in shapes.OutList:
           self.index_ribs(shape.Shape, ribs_data)
@@ -595,15 +598,23 @@ class Components:
 
   def draw_rib(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
-    stringer_width = dimensions.get("stringer_width")
-    stringer_depth = dimensions.get("stringer_depth")
-    rib_width = dimensions.get("rib_width")
-    rib_depth = dimensions.get("rib_depth")
-    rib_thwart_depth = dimensions.get("rib_thwart_depth")
+    rib_width = dimensions.get("rib_width").Value
+    rib_depth = dimensions.get("rib_depth").Value
+    rib_thwart_depth = dimensions.get("rib_thwart_depth").Value
+    brace_width = dimensions.get("brace_width").Value
+    brace_width_narrow = dimensions.get("brace_width_narrow").Value
     rib_chamfer_radius = dimensions.get("rib_chamfer_radius")
-    thwart_height = dimensions.get("thwart_height")
+    rib_chamfer_radius_narrow = dimensions.get("rib_chamfer_radius_narrow")
+    rib_outside_relief = dimensions.get("rib_outside_relief")
+    thwart_height = dimensions.get("thwart_height").Value
+    low_thwart_height = dimensions.get("low_thwart_height").Value
     deck_width = dimensions.get("deck_width")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
+
+    if rib_type == "thwart_narrow":
+      brace_width = brace_width_narrow
+      rib_chamfer_radius = rib_chamfer_radius_narrow
+
     print("New rib:", rib_position, rib_index, rib_type)
 
     if rib_wire.Length < 1:
@@ -646,7 +657,7 @@ class Components:
         continue
 
       # Curve ribs away from skin between stringers.
-      diff = (vertex - previous).normalize() * 20
+      diff = (vertex - previous).normalize() * rib_outside_relief
       cross = (diff / 2).cross(App.Vector(0, 1, 0))
       new = (previous + vertex) / 2 + cross
       arc = Part.Arc(previous, new, vertex).toShape()
@@ -658,6 +669,7 @@ class Components:
 
     inner_rib_wire = rib_wire.makeOffset2D(-rib_depth, openResult = True, fill = False)
     inner_rib_wire = simplify_arcs(inner_rib_wire)
+    #Part.show(inner_rib_wire, "inner_rib_wire")
 
     outer_ends = get_wire_ends(outer_rib_wire)
     inner_ends = get_wire_ends(inner_rib_wire)
@@ -671,41 +683,41 @@ class Components:
 
     if abs(rib_wire.BoundBox.XMax) > rib_depth * 2:
       # Big enough to fit thwarts in.
-      if rib_type == "thwart":
-        rib_intersection_height = Part.makeLine(
-            App.Vector(deck_width.Value, float(rib_position), thwart_height.Value),
-            App.Vector(0.0, float(rib_position), thwart_height.Value)
-        )
-        rib_intersection_bottom = Part.makeLine(
-            App.Vector(rib_thwart_depth.Value / 2, float(rib_position), thwart_height.Value),
-            App.Vector(rib_thwart_depth.Value / 2, float(rib_position), 0.0)
-        )
+      if rib_type == "open":
+        thwart_height = low_thwart_height
 
-        thwart_edge = None
-        brace_edge = None
+      rib_intersection_height = Part.makeLine(
+          App.Vector(deck_width.Value, float(rib_position), thwart_height),
+          App.Vector(0.0, float(rib_position), thwart_height)
+      )
+      rib_intersection_bottom = Part.makeLine(
+          App.Vector(brace_width / 2, float(rib_position), thwart_height),
+          App.Vector(brace_width / 2, float(rib_position), 0.0)
+      )
 
-        for edge in rib_wire.Edges:
-          common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
-          for point in common:
-            thwart_edge = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height.Value))
+      thwart_edge = None
+      brace_edge = None
 
-          common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
-          for point in common:
-            brace_edge = Part.makeLine(point, App.Vector(rib_thwart_depth.Value / 2, float(rib_position), thwart_height.Value))
+      for edge in rib_wire.Edges:
+        common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
+        for point in common:
+          thwart_edge = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height))
 
-        if thwart_edge:
-          thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * rib_thwart_depth.Value)
-          rib_face = rib_face.fuse(thwart_face)
+        common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
+        for point in common:
+          brace_edge = Part.makeLine(point, App.Vector(brace_width / 2, float(rib_position), thwart_height))
 
-        if brace_edge:
-          brace_face = brace_edge.extrude(App.Vector(1, 0, 0) * -rib_thwart_depth.Value / 2)
-          rib_face = rib_face.fuse(brace_face)
+      if thwart_edge:
+        thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * rib_thwart_depth)
+        rib_face = rib_face.fuse(thwart_face)
 
-        rib_face = DraftGeomUtils.concatenate(rib_face)
-        rib_face = self.chamfer_rib_hole(rib_face, rib_chamfer_radius)
-      elif rib_type == "regular":
-        # TODO: Chamfer this rib type.
-        pass
+      if brace_edge:
+        brace_face = brace_edge.extrude(App.Vector(1, 0, 0) * -brace_width / 2)
+        rib_face = rib_face.fuse(brace_face)
+
+      rib_face = DraftGeomUtils.concatenate(rib_face)
+      if rib_type in ("thwart", "thwart_narrow"):
+        rib_face = self.chamfer_rib_hole(rib_face, rib_chamfer_radius, deck_width)
     else:
       # Too small to do offset. Just make a solid rib.
       xmin = min(outer_rib_wire.OrderedVertexes[0].X, outer_rib_wire.OrderedVertexes[-1].X)
@@ -739,12 +751,16 @@ class Components:
     self.group.addObjects([group_component])
     self.rib_groups[rib_position] = group_component
 
-  def chamfer_rib_hole(self, rib_face, rib_chamfer_radius):
+  def chamfer_rib_hole(self, rib_face, rib_chamfer_radius, deck_width):
     inner_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[0]
     outer_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[-1]
     outer_face = Part.Face(outer_wire)
 
-    offset = inner_wire.makeOffset2D(-rib_chamfer_radius, openResult = False, fill = False)
+    try:
+      offset = inner_wire.makeOffset2D(-rib_chamfer_radius, openResult = False, fill = False)
+    except:
+      print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value.")
+      return rib_face
     #Part.show(inner_wire, "inner_wire")
     #Part.show(offset, "offset")
 
@@ -763,11 +779,8 @@ class Components:
         common = offset_edge.Vertexes[-1].Point
         other = (offset_edge.Vertexes[0].Point, previous.Vertexes[0].Point)
       else:
-        print(offset_edge.Vertexes[0].Point)
-        print(offset_edge.Vertexes[1].Point)
-        print(previous.Vertexes[0].Point)
-        print(previous.Vertexes[1].Point)
-        raise
+        print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value.")
+        continue
       previous = offset_edge
 
       v1 = (common - other[0]).normalize()
@@ -801,7 +814,7 @@ class Components:
         arc = Part.makeCircle(rib_chamfer_radius, common, App.Vector(0, 1, 0), arc_end_angles[1], arc_end_angles[0])
       else:
         arc = Part.makeCircle(rib_chamfer_radius, common, App.Vector(0, 1, 0), arc_end_angles[0], arc_end_angles[1])
-      arc_offset = arc.makeOffset2D(-rib_chamfer_radius.Value * 10, openResult = True, fill = True)
+      arc_offset = arc.makeOffset2D(-deck_width, openResult = True, fill = True)
       arc_offset = arc_offset.common(outer_face)  # Can probably do this once for all 3 arcs.
       #Part.show(arc_offset, "arc_offset")
 
@@ -830,6 +843,7 @@ class Components:
     self.group.addObjects([group_component])
     group_component.addObjects([ Part.show(part_3d) ])
     self.stem = part_3d
+    self.components_flat["stem"] = part_3d
 
   def draw_stern(self):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
@@ -853,6 +867,7 @@ class Components:
     self.group.addObjects([group_component])
     group_component.addObjects([ Part.show(part_3d) ])
     self.stern = part_3d
+    self.components_flat["stern"] = part_3d
 
   def draw_keelson(self):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
@@ -877,6 +892,7 @@ class Components:
     self.group.addObjects([group_component])
     group_component.addObjects([ Part.show(part_3d) ])
     self.keelson = part_3d
+    self.components_bulk["keelson"] = part_3d
 
   def mirror_sides(self):
     for rib_position, rib in self.ribs.items():
@@ -884,13 +900,20 @@ class Components:
       rib_mirrored = rib.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       rib = rib.fuse(rib_mirrored)
       rib = rib.removeSplitter()
-      self.rib_groups[rib_position].addObjects([Part.show(rib)])
+      name = f"rib_{rib_position}"
+      self.rib_groups[rib_position].addObjects([Part.show(rib, name)])
+      self.components_flat[name] = rib
 
     for stringer in self.stringers:
       print(stringer)
       stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       #stringer = stringer.fuse(stringer_mirrored)
-      self.stringers_group.addObjects([Part.show(stringer), Part.show(stringer_mirrored)])
+      name = f"stringer_{stringer.BoundBox.ZMin}"
+      name_port = f"{name}_port"
+      name_starboard = f"{name}_starboard"
+      self.stringers_group.addObjects([Part.show(stringer, name_port), Part.show(stringer_mirrored, name_starboard)])
+      self.components_bulk[name_port] = stringer
+      self.components_bulk[name_starboard] = stringer_mirrored
 
   @classmethod
   def diagonal_normal_at(cls, diagonal, point):
@@ -899,33 +922,91 @@ class Components:
     return None
 
 
-def has_group_by_label(doc, label):
+class Layout:
+  bodies = []
+
+  def __init__(self, doc, components: Components):
+    self.doc = doc
+    self.components = components
+    #plywood = doc.addObject('App::Part', 'Part')
+    #doc.Tip = plywood
+    #plywood.Label = "plywood"
+    plywood = create_group(doc, "plywood", type_ = 'App::Part')
+    doc.Tip = plywood
+
+    self.project_parts(plywood)
+
+  def project_parts(self, plywood: Part):
+    #body = create_group(doc, f"cutouts", type_ = 'PartDesign::Body')
+    #plywood.addObject(body)
+
+    y_pos_mod = 0
+    for label, component in components.components_flat.items():
+      center = component.CenterOfGravity
+      if "rib" in label:
+        direction = App.Vector(1, 0, 0)
+        x_pos = component.BoundBox.XLength / 2
+        y_pos = 0 #-component.BoundBox.YMax
+        y_pos_mod += component.BoundBox.ZLength
+        z_pos = -component.BoundBox.YMin
+      elif label in ["stem", "stern"]:
+        direction = App.Vector(0, 1, 0)
+        x_pos = 0
+        y_pos = -component.BoundBox.YMax
+        y_pos_mod += component.BoundBox.YLength
+        z_pos = -component.BoundBox.XMin
+
+      body = doc.addObject('PartDesign::Body', f"cutout_{label}")
+      plywood.addObject(body)
+      feature = App.ActiveDocument.addObject("Part::Feature", f"cutout_feature_{label}")
+      plywood.addObject(feature)
+      feature.Shape = component
+      body.BaseFeature = feature
+      feature.ViewObject.Visibility = False
+
+      y_pos += y_pos_mod + 100
+      body.Placement = App.Placement(App.Vector(x_pos, y_pos, z_pos), direction, 90)
+
+      self.bodies.append(body)
+
+      #doc.recompute()
+      link = doc.addObject('App::Link', f"link_cutout_{label}")
+      link.setLink(body)
+      #doc.recompute()
+      link.Label = f"link_cutout_{label}"
+      link.LinkTransform = True
+      #doc.recompute()
+      face = Draft.make_shape2dview(link, App.Vector(0, 0, 1))
+      face.Label = f"face_{label}"
+
+def has_object_by_label(doc, label):
   return label in [o.Label for o in FreeCAD.ActiveDocument.Objects]
 
 
 def remove_group(doc, name):
-  if not has_group_by_label(doc, name):
+  if not has_object_by_label(doc, name):
     return
 
-  group = doc.getObjectsByLabel(name)
-  if group:
-    #print(f"Removing previous sketch: {name}")
-    OpenSCADUtils.removesubtree(group)
+  groups = doc.getObjectsByLabel(name)
+  if not isinstance(groups, list):
+    groups = [groups]
 
-
-def create_group(doc, name):
-  #print(f"Checking for: {name}")
-  if  has_group_by_label(doc, name):
-    group = doc.getObjectsByLabel(name)
+  for group in groups:
     if group:
-      #print(f"Removing previous sketch: {name}")
-      OpenSCADUtils.removesubtree(group)
+      try:
+        OpenSCADUtils.removesubtree(group)
+      except TypeError:
+        group.removeObjectsFromDocument()
+        doc.removeObject(group.Name)
 
-  return doc.addObject('App::DocumentObjectGroup', name)
+
+def create_group(doc, name, type_ = 'App::DocumentObjectGroup'):
+  remove_group(doc, name)
+  return doc.addObject(type_, name)
 
 
 def addSelection(doc, label):
-  if not has_group_by_label(doc, label):
+  if not has_object_by_label(doc, label):
     return
   Gui.Selection.addSelection(doc.Name, label)
 
@@ -1053,7 +1134,8 @@ if body:
 
   Plans(doc, body.Name, lowest_point)
 
-  Components(doc, body.Name, body.Shape, data_xz)
+  components = Components(doc, body.Name, body.Shape, data_xz)
+  Layout(doc, components)
 
 else:
   print("No hull selected.")
