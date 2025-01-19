@@ -12,6 +12,7 @@ import TechDraw
 import Part
 import DraftGeomUtils
 import draftgeoutils
+import importDXF
 from FreeCAD import Units
 
 class Slice_Base(list):
@@ -908,10 +909,12 @@ class Components:
       print(stringer)
       stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       #stringer = stringer.fuse(stringer_mirrored)
-      name = f"stringer_{stringer.BoundBox.ZMin}"
+      name = f"stringer_{round(stringer.BoundBox.ZMin)}"
       name_port = f"{name}_port"
       name_starboard = f"{name}_starboard"
-      self.stringers_group.addObjects([Part.show(stringer, name_port), Part.show(stringer_mirrored, name_starboard)])
+      self.stringers_group.addObjects([
+        Part.show(stringer, name_port),
+        Part.show(stringer_mirrored, name_starboard)])
       self.components_bulk[name_port] = stringer
       self.components_bulk[name_starboard] = stringer_mirrored
 
@@ -922,62 +925,109 @@ class Components:
     return None
 
 
+class Mass:
+  def __init__(self, doc, components: Components):
+    self.doc = doc
+    self.components = components
+
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    plywood_density = dimensions.get("plywood_density")
+    pine_density = dimensions.get("pine_density")
+
+    flat_volume = self.get_volume(components.components_flat)
+    bulk_volume = self.get_volume(components.components_bulk)
+
+    flat_volume_m3 = round(flat_volume / 1e9, 5)
+    bulk_volume_m3 = round(bulk_volume / 1e9, 5)
+    print(
+        f"pine:    {bulk_volume_m3:4.3f}m³ {flat_volume_m3 * pine_density:4.2f}kg")
+    print(
+        f"plywood: {bulk_volume_m3:4.3f}m³ {bulk_volume_m3 * plywood_density:4.2f}kg")
+
+  def get_volume(self, parts):
+    total_volume = 0
+    for label, component in parts.items():
+      print(f"{label:<25}:{round(component.Volume / 1e9, 5)}m^3")
+      total_volume += component.Volume
+    return total_volume
+
+
 class Layout:
-  bodies = []
+  bodies = {}
+  faces = []
 
   def __init__(self, doc, components: Components):
     self.doc = doc
     self.components = components
-    #plywood = doc.addObject('App::Part', 'Part')
-    #doc.Tip = plywood
-    #plywood.Label = "plywood"
-    plywood = create_group(doc, "plywood", type_ = 'App::Part')
-    doc.Tip = plywood
+    self.cutouts = create_group(doc, "cutouts", type_ = 'App::Part')
+    self.cutouts.Visibility = False
+    self.scratch = create_group(self.doc, "scratch")
+    self.scratch.Visibility = False
+    self.plans = create_group(self.doc, "plans")
 
-    self.project_parts(plywood)
+    self.project_parts()
+    self.draw_plans()
+    self.export_dxf()
 
-  def project_parts(self, plywood: Part):
-    #body = create_group(doc, f"cutouts", type_ = 'PartDesign::Body')
-    #plywood.addObject(body)
-
+  def project_parts(self):
+    x_pos_offset = 1000
+    y_pos_offset = -2000
     y_pos_mod = 0
-    for label, component in components.components_flat.items():
+    for label, component in self.components.components_flat.items():
+      label = label.replace("-", "M")
       center = component.CenterOfGravity
       if "rib" in label:
         direction = App.Vector(1, 0, 0)
-        x_pos = component.BoundBox.XLength / 2
-        y_pos = 0 #-component.BoundBox.YMax
-        y_pos_mod += component.BoundBox.ZLength
+        x_pos = component.BoundBox.XLength / 2 + x_pos_offset
+        y_pos = y_pos_offset
+        y_pos_mod += component.BoundBox.ZLength + 50
         z_pos = -component.BoundBox.YMin
       elif label in ["stem", "stern"]:
         direction = App.Vector(0, 1, 0)
-        x_pos = 0
-        y_pos = -component.BoundBox.YMax
-        y_pos_mod += component.BoundBox.YLength
+        x_pos = x_pos_offset
+        y_pos = -component.BoundBox.YMax + y_pos_offset
+        y_pos_mod += component.BoundBox.YLength + 50
         z_pos = -component.BoundBox.XMin
 
       body = doc.addObject('PartDesign::Body', f"cutout_{label}")
-      plywood.addObject(body)
-      feature = App.ActiveDocument.addObject("Part::Feature", f"cutout_feature_{label}")
-      plywood.addObject(feature)
+      self.cutouts.addObject(body)
+      feature = App.ActiveDocument.addObject(
+          "Part::Feature", f"cutout_feature_{label}")
+      feature.Label = f"cutout_feature_{label}"
+      self.cutouts.addObject(feature)
       feature.Shape = component
       body.BaseFeature = feature
       feature.ViewObject.Visibility = False
 
-      y_pos += y_pos_mod + 100
+      y_pos += y_pos_mod
       body.Placement = App.Placement(App.Vector(x_pos, y_pos, z_pos), direction, 90)
 
-      self.bodies.append(body)
+      self.bodies[label] = body
 
-      #doc.recompute()
+  def draw_plans(self):
+    for label, body in self.bodies.items():
       link = doc.addObject('App::Link', f"link_cutout_{label}")
       link.setLink(body)
-      #doc.recompute()
       link.Label = f"link_cutout_{label}"
       link.LinkTransform = True
-      #doc.recompute()
+      link.ViewObject.Visibility = False
+      self.scratch.addObject(link)
+
       face = Draft.make_shape2dview(link, App.Vector(0, 0, 1))
       face.Label = f"face_{label}"
+      self.plans.addObject(face)
+      self.faces.append(face)
+
+  def export_dxf(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    export_dxf = dimensions.get("export_dxf")
+    if not export_dxf:
+      return
+
+    path = u"/home/duncan/Working/freecad_small_boat_hull/dingy.dxf"
+    self.doc.recompute()
+    importDXF.export(self.faces, path, lwPoly=True)
+
 
 def has_object_by_label(doc, label):
   return label in [o.Label for o in FreeCAD.ActiveDocument.Objects]
@@ -1136,6 +1186,7 @@ if body:
 
   components = Components(doc, body.Name, body.Shape, data_xz)
   Layout(doc, components)
+  Mass(doc, components)
 
 else:
   print("No hull selected.")
