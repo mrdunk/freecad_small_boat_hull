@@ -1,0 +1,160 @@
+# vim: set ft=python :
+# vim: set expandtab :
+
+from typing import Any
+import logging
+
+import FreeCAD as App
+import OpenSCADUtils
+import Draft
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+class Hull:
+    def __init__(self, boat_name: str):
+        logger.info("start")
+        label = "hull"
+        self.doc = App.ActiveDocument or App.newDocument()
+
+        self.boat = (
+                self.doc.getObject(boat_name) or
+                self.doc.getObjectsByLabel(boat_name))[0]
+        if not self.boat:
+            assert False, f"No object called {boat_name}."
+        self.doc.recompute()
+        self.hull = create_group(self.doc, label, element_type='PartDesign::Body')
+        self.doc.recompute()
+        self.boat.addObject(self.hull)
+        self.doc.recompute()
+
+        self.deck_length = get_dimension(self.doc, "deck_length")
+        self.deck_width = get_dimension(self.doc, "deck_width")
+        self.deck_height = get_dimension(self.doc, "deck_height")
+        prow_height = get_dimension(self.doc, "prow_height")
+        stern_height = get_dimension(self.doc, "stern_height")
+        self.highest = max(prow_height, stern_height)
+        section_count = get_dimension(self.doc, "section_count")
+        # Templates outlining hull shape.
+        self.sketch_profile_deck = self.doc.getObjectsByLabel('profile_deck')[0]
+        self.sketch_profile_keel = self.doc.getObjectsByLabel('profile_keel')[0]
+        self.sketch_plan_deck = self.doc.getObjectsByLabel('plan_deck')[0]
+        self.sketch_cross_section = self.doc.getObjectsByLabel('cross_section_shape')[0]
+
+        logger.info(f"Calculating {section_count} cross sections")
+        self.cross_sections = {}
+        section_pos = -self.deck_length / 2
+        step_len = self.deck_length / (section_count - 1)
+        index = 0
+        while round(section_pos) <= round(self.deck_length / 2):
+            section_label = f"rib_{round(section_pos.Value, 0)}"
+            section = self.calculate_section(index, section_pos, section_label)
+            if section is not None:
+                self.cross_sections[section_label] = section
+            index += 1
+            section_pos += step_len
+
+        #self.loft()
+
+    def calculate_section(self, index: int, section_pos: float, section_label: str) -> None:
+        #logger.info(f"\t{index}\t{round(section_pos, 2)}")
+        # Plane for calculating intersections.
+        intersection_plane = Part.makePlane(
+                self.highest,
+                self.deck_width,
+                App.Vector(-self.deck_width, -section_pos, 0),
+                App.Vector(0, 1, 0))
+        #Part.show(intersection_plane)
+
+        deck_plan_intersection = self.get_intersection(
+                self.sketch_plan_deck, intersection_plane)
+        deck_height_intersection = self.get_intersection(
+                self.sketch_profile_deck, intersection_plane)
+        keel_height_intersection = self.get_intersection(
+                self.sketch_profile_keel, intersection_plane)
+
+        x_ratio = deck_plan_intersection.BoundBox.XMin / (self.deck_width.Value / 2)
+        z_ratio = (deck_height_intersection.BoundBox.ZMax - keel_height_intersection.BoundBox.ZMax) / self.deck_height.Value
+        matrix = App.Matrix()
+        matrix.scale(x_ratio, 0, z_ratio)
+        print(x_ratio, z_ratio, App.Vector(x_ratio, 0, z_ratio).Length)
+        if App.Vector(x_ratio, 0, z_ratio).Length < 0.01:
+            #matrix.scale(0.01, 0, 0.01)
+            print("nope")
+            return None
+        shape = Part.Shape(self.sketch_cross_section.Shape)
+        result = shape.transformGeometry(matrix)
+
+        result.Placement = App.Placement(
+                App.Vector(0, section_pos, keel_height_intersection.BoundBox.ZMin),
+                App.Vector(1, 0, 0),
+                90)
+        #Part.show(result)
+
+        sketch = Draft.makeSketch(result, autoconstraints=True)
+        sketch.MapMode = "FlatFace"
+        self.hull.addObject(sketch)
+        sketch.Shape = result
+        sketch.Placement = App.Placement(
+                App.Vector(0, section_pos, 0),
+                App.Vector(1, 0, 0),
+                90)
+
+        return sketch
+
+    def loft(self):
+        additive_loft = self.hull.newObject('PartDesign::AdditiveLoft', f"hull_loft")
+        additive_loft.Ruled = True
+
+        for _, cross_section in self.cross_sections:
+          if not additive_loft.Profile:
+            additive_loft.Profile = cross_section
+          else:
+            additive_loft.Sections += [cross_section]
+
+
+    @classmethod
+    def get_intersection(cls, sketch, plane):
+        return sketch.Shape.section(plane)
+      #for edge in sketch.Shape.Edges:
+      #  points = plane.Surface.intersect(edge.Curve)
+      #  if not points:
+      #    continue
+      #  for point in points[0]:
+      #    if (plane.isInside(Vector(point.X, point.Y, point.Z), 0.01, True) and 
+      #    edge.isInside(Vector(point.X, point.Y, point.Z), 0.01, True)):
+      #      return point
+      #return None
+
+def get_dimension(doc, label: str) -> Any:
+    dimensions = doc.getObjectsByLabel('dimensions')[0]
+    return dimensions.get(label)
+
+def has_object_by_label(doc, label):
+  return label in [o.Label for o in FreeCAD.ActiveDocument.Objects]
+
+def remove_group(doc, name):
+  if not has_object_by_label(doc, name):
+    return
+
+  groups = doc.getObjectsByLabel(name)
+  if not isinstance(groups, list):
+    groups = [groups]
+
+  for group in groups:
+    if group:
+      try:
+        OpenSCADUtils.removesubtree(group)
+      except TypeError:
+        group.removeObjectsFromDocument()
+        doc.removeObject(group.Name)
+
+def create_group(doc, name, element_type='App::DocumentObjectGroup'):
+  remove_group(doc, name)
+  doc.recompute()
+  new = doc.addObject(element_type, name)
+  doc.recompute()
+  return new
+
+
+Hull("boat")
