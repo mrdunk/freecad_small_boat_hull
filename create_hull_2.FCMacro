@@ -3,10 +3,12 @@
 
 from typing import Any
 import logging
+import math
 
 import FreeCAD as App
 import OpenSCADUtils
 import Draft
+from FreeCAD import Rotation
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +18,10 @@ class Hull:
         logger.info("start")
         label = "hull"
         self.doc = App.ActiveDocument or App.newDocument()
+
+        dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+        deck_width = dimensions.get("deck_width")
+        deck_height = dimensions.get("deck_height")
 
         self.boat = (
                 self.doc.getObject(boat_name) or
@@ -28,6 +34,16 @@ class Hull:
         self.boat.addObject(self.hull)
         self.doc.recompute()
 
+        # Templates outlining hull shape.
+        sketch_profile_deck = self.doc.getObjectsByLabel('profile_deck')[0]
+        sketch_profile_keel = self.doc.getObjectsByLabel('profile_keel')[0]
+        sketch_plan_deck = self.doc.getObjectsByLabel('plan_deck')[0]
+        # These 2 dictate the centre of the arc used to form the curve from the top
+        # of the hull deadrise to the deck.
+        sketch_hull_curve_height = self.doc.getObjectsByLabel('hull_curve_height')[0]
+        sketch_hull_curve_horizontal = self.doc.getObjectsByLabel('hull_curve_horizontal')[0]
+
+        # Sizes.
         self.deck_length = get_dimension(self.doc, "deck_length")
         self.deck_width = get_dimension(self.doc, "deck_width")
         self.deck_height = get_dimension(self.doc, "deck_height")
@@ -35,96 +51,239 @@ class Hull:
         stern_height = get_dimension(self.doc, "stern_height")
         self.highest = max(prow_height, stern_height)
         section_count = get_dimension(self.doc, "section_count")
-        # Templates outlining hull shape.
-        self.sketch_profile_deck = self.doc.getObjectsByLabel('profile_deck')[0]
-        self.sketch_profile_keel = self.doc.getObjectsByLabel('profile_keel')[0]
-        self.sketch_plan_deck = self.doc.getObjectsByLabel('plan_deck')[0]
-        self.sketch_cross_section = self.doc.getObjectsByLabel('cross_section_shape')[0]
+        highest = deck_height + max(prow_height, stern_height)
 
         logger.info(f"Calculating {section_count} cross sections")
+
+        # Create an initial template to work out the deadrise curve radius.
+        deadrise_radius = self.draw_template(deck_width / 2, deck_height, deck_width / 4, deck_height.Value + 40, 0)
+
         self.cross_sections = {}
-        section_pos = -self.deck_length / 2
-        step_len = self.deck_length / (section_count - 1)
-        index = 0
-        while round(section_pos) <= round(self.deck_length / 2):
-            section_label = f"rib_{round(section_pos.Value, 0)}"
-            section = self.calculate_section(index, section_pos, section_label)
-            if section is not None:
+        section_pos = -self.deck_length.Value / 2
+        step_len = self.deck_length.Value / (section_count - 1)
+        for index in range(section_count):
+            working_section_pos = section_pos
+            if section_pos < -self.deck_length.Value / 2 + 10:
+                working_section_pos = -self.deck_length.Value / 2 + 10
+            elif section_pos > self.deck_length.Value / 2 - 10:
+                working_section_pos = self.deck_length.Value / 2 - 10
+
+            print(section_count, section_pos, working_section_pos)
+
+            # intersect outline drawings to find section dimensions.
+            intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, -working_section_pos, 0), App.Vector(0, 1, 0))
+            deck_plan_intersection = sketch_plan_deck.Shape.section(intersection_plane).Vertexes[0].X
+            deck_height_intersection = sketch_profile_deck.Shape.section(intersection_plane).Vertexes[0].Z
+            keel_height_intersection = sketch_profile_keel.Shape.section(intersection_plane).Vertexes[0].Z
+            hull_curve_height_intersection = sketch_hull_curve_height.Shape.section(intersection_plane).Vertexes[0].Z
+            hull_curve_horizontal_intersection = sketch_hull_curve_horizontal.Shape.section(intersection_plane).Vertexes[0].X
+
+            section_label = f"rib_{round(working_section_pos, 0)}"
+            print(section_label, index)
+
+            if(working_section_pos - self.deck_length.Value / 2 > -10):
+                working_section_pos = self.deck_length.Value / 2 - 10
+                
+            section = self.draw_section(
+                    -deck_plan_intersection,
+                    deck_height_intersection,
+                    -hull_curve_horizontal_intersection,
+                    hull_curve_height_intersection,
+                    keel_height_intersection,
+                    #abs(deadrise_radius * (deck_width.Value / 2) / (deck_plan_intersection + 1))
+                    #deadrise_radius * deck_height_intersection / deck_height
+                    deadrise_radius
+                    )
+            if section:
+                section.AttachmentOffset = App.Placement(
+                        App.Vector(0, working_section_pos, 0),
+                        App.Vector(1, 0, 0),
+                        90)
+                self.hull.addObject(section)
                 self.cross_sections[section_label] = section
-            index += 1
+
             section_pos += step_len
 
-        #self.loft()
+        self.loft()
 
-    def calculate_section(self, index: int, section_pos: float, section_label: str) -> None:
-        #logger.info(f"\t{index}\t{round(section_pos, 2)}")
-        # Plane for calculating intersections.
-        intersection_plane = Part.makePlane(
-                self.highest,
-                self.deck_width,
-                App.Vector(-self.deck_width, -section_pos, 0),
-                App.Vector(0, 1, 0))
-        #Part.show(intersection_plane)
+    def draw_template(self, deck_width, deck_height, curve_width, curve_height, keel_height):
+        print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=}")
+        plane = self.doc.getObjectsByLabel("XY-plane")[0]
 
-        deck_plan_intersection = self.get_intersection(
-                self.sketch_plan_deck, intersection_plane)
-        deck_height_intersection = self.get_intersection(
-                self.sketch_profile_deck, intersection_plane)
-        keel_height_intersection = self.get_intersection(
-                self.sketch_profile_keel, intersection_plane)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "template")
+        sketch.AttachmentOffset = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        sketch.AttachmentSupport = (plane, [''])
+        sketch.MapMode = 'FlatFace'
+        sketch.Visibility = False
+        self.doc.recompute()
 
-        x_ratio = deck_plan_intersection.BoundBox.XMin / (self.deck_width.Value / 2)
-        z_ratio = (deck_height_intersection.BoundBox.ZMax - keel_height_intersection.BoundBox.ZMax) / self.deck_height.Value
-        matrix = App.Matrix()
-        matrix.scale(x_ratio, 0, z_ratio)
-        print(x_ratio, z_ratio, App.Vector(x_ratio, 0, z_ratio).Length)
-        if App.Vector(x_ratio, 0, z_ratio).Length < 0.01:
-            #matrix.scale(0.01, 0, 0.01)
-            print("nope")
-            return None
-        shape = Part.Shape(self.sketch_cross_section.Shape)
-        result = shape.transformGeometry(matrix)
+        origin =          App.Vector(0,               keel_height,         0)
+        deadrise_mid =    App.Vector(-deck_width / 4, keel_height,         0)
+        deadrise_end =    App.Vector(-deck_width / 2, deck_height / 5,     0)
+        curve_mid =       App.Vector(-deck_width,     3 * deck_height / 5, 0)
+        curve_top =       App.Vector(-deck_width,     deck_height,         0)
+        
+        upper_curve_center = App.Vector(-curve_width, curve_height, 0)
+        upper_curve_radius = upper_curve_center.distanceToPoint(curve_top)
 
-        result.Placement = App.Placement(
-                App.Vector(0, section_pos, keel_height_intersection.BoundBox.ZMin),
-                App.Vector(1, 0, 0),
-                90)
-        #Part.show(result)
+        deadrise = sketch.addGeometry(Part.Arc(origin, deadrise_mid, deadrise_end))
+        upper_curve = sketch.addGeometry(Part.Arc(deadrise_end, curve_mid, curve_top))
 
-        sketch = Draft.makeSketch(result, autoconstraints=True)
-        sketch.MapMode = "FlatFace"
-        self.hull.addObject(sketch)
-        sketch.Shape = result
-        sketch.Placement = App.Placement(
-                App.Vector(0, section_pos, 0),
-                App.Vector(1, 0, 0),
-                90)
+        self.constrain_to_point(sketch, deadrise, 2, origin)
+        self.constrain_to_point(sketch, upper_curve, 1, curve_top)
+        self.constrain_to_point(sketch, upper_curve, 3, upper_curve_center)
+
+        self.doc.recompute()
+
+        # Clamp deadrise center on hull center line.
+        # This forces the very bottom of the curve to be horizontal.
+        con = sketch.addConstraint(Sketcher.Constraint("DistanceX", deadrise, 3, 0))
+        sketch.renameConstraint(con, u'force_flat_bottom')
+        tan = sketch.addConstraint(Sketcher.Constraint('Tangent', deadrise, 1, upper_curve, 2))
+        sketch.renameConstraint(tan, u'collinear_curves')
+        self.doc.recompute()
+        deadrise_radius = sketch.Geometry[deadrise].Radius
+
+        return deadrise_radius
+
+    def draw_section(self, deck_width, deck_height, curve_width, curve_height, keel_height, deadrise_radius):
+        print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=} {deadrise_radius=}")
+        if abs(deck_width) < 1.0:
+            print("Skipping section")
+            return 0
+        plane = self.doc.getObjectsByLabel("XY-plane")[0]
+
+        sketch = self.doc.addObject("Sketcher::SketchObject", "cross_section")
+        sketch.AttachmentOffset = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        sketch.AttachmentSupport = (plane, [''])
+        sketch.MapMode = 'FlatFace'
+        sketch.Visibility = False
+        self.doc.recompute()
+
+        origin =          App.Vector(0,               keel_height,         0)
+        curve_top =       App.Vector(-deck_width,     deck_height,         0)
+        
+        upper_curve_center = App.Vector(-curve_width, curve_height, 0)
+        upper_curve_radius = upper_curve_center.distanceToPoint(curve_top)
+
+        # We already know 2 out of the 3 points that define the upper_curve: curve_mid and curve_top.
+        # To work out where the 2 curves meet, we must work out the shape of the triangle governing
+        # the deadrise curve.
+        # We know the origin.
+        # We know the deadrise_radius. This is the distance from both the origin to deadrise_center
+        # and also the distance from the curve joining point and deadrise_center.
+        # For the 2 curves to be collinear at their meeting point, the line perpendicular to the curves at
+        # this point must go through the center point of both arcs.
+        # With this we can work out the lengths of all 3 edges of the triangle governing the deadrise curve.
+        #   a == origin -> deadrise_center             == deadrise_radius
+        #   b == upper_curve_center -> deadrise_center == deadrise_radius - upper_curve_radius
+        #   c == upper_curve_center -> origin          == upper_curve_center.distanceToPoint(origin)
+        # With this we can work out the angle between b and c and use this angle combined with upper_curve_center 
+        # and upper_curve_radius to work out the curve joining point.
+        a = deadrise_radius
+        b = deadrise_radius - upper_curve_radius
+        c = upper_curve_center.distanceToPoint(origin)
+
+        # Cosine rule:
+        diviser = 2 * b * c
+        if diviser < 1e-4:
+            A = 0
+        else:
+            val = (b**2 + c**2 - a**2) / diviser
+            A = 0
+            if abs(val) < 1 : A = math.acos(val)
+
+        c_vec = upper_curve_center - origin
+        rot = Rotation(App.Vector(0, 0, 1), math.degrees(A))
+        b_vec = -rot.multVec(c_vec).normalize()
+        join_point = upper_curve_center + b_vec * -upper_curve_radius
+        deadrise_center = upper_curve_center + b_vec * b
+
+        axis = App.Vector(0, 0, 1)
+        up = App.Vector(1, 0, 0)
+        truncate_curve = False
+
+        if join_point.y > curve_top.y or abs(join_point.x) > abs(curve_top.x):
+            # Top curve is entirely above the deck
+            # or
+            # op of top curve is narrower than widest point.
+            join_point = curve_top - App.Vector(0, 1, 0)
+            truncate_curve = True
+
+        start_angle = -(join_point - deadrise_center).getAngle(up)
+        end_angle = -(origin - deadrise_center).getAngle(up)
+        
+        if start_angle == end_angle:
+            deadrise_geometery_l = Part.LineSegment(join_point, origin)
+            deadrise_geometery_r = Part.LineSegment(origin, mirror(join_point))
+        else:
+            deadrise_geometery_l = Part.ArcOfCircle(
+                Part.Circle(deadrise_center, axis, deadrise_radius),
+                start_angle, end_angle)
+
+            # mirror to other side.
+            deadrise_geometery_r = Part.ArcOfCircle(
+                Part.Circle(mirror(deadrise_center), axis, deadrise_radius),
+                math.pi - end_angle, math.pi - start_angle)
+        deadrise_l = sketch.addGeometry(deadrise_geometery_l)
+        deadrise_r = sketch.addGeometry(deadrise_geometery_r)
+        self.constrain_to_point(sketch, deadrise_l, 1, join_point)
+        self.constrain_to_point(sketch, deadrise_l, 2, origin)
+        self.constrain_to_point(sketch, deadrise_r, 2, mirror(join_point))
+        self.constrain_to_point(sketch, deadrise_r, 1, origin)
+
+        if truncate_curve:
+            # Short straight line at the top to keep number of elements the same even though
+            # the original curve would have been entirely above deck height.
+            #start_point = deadrise_geometery_l.StartPoint + App.Vector(0, 1, 0)
+            #end_point = deadrise_geometery_l.StartPoint
+            start_point = curve_top
+            end_point = join_point
+            upper_curve_geometry_l = Part.LineSegment(start_point, end_point)
+            upper_curve_geometry_r = Part.LineSegment(mirror(end_point), mirror(start_point))
+        else:
+            start_point = curve_top
+            end_point = join_point
+            start_angle = -(curve_top - upper_curve_center).getAngle(up)
+            end_angle = -(join_point - upper_curve_center).getAngle(up)
+            upper_curve_geometry_l = Part.ArcOfCircle(Part.Circle(upper_curve_center, axis, upper_curve_radius), start_angle, end_angle)
+            upper_curve_geometry_r = Part.ArcOfCircle(Part.Circle(mirror(upper_curve_center), axis, upper_curve_radius), math.pi - end_angle, math.pi - start_angle)
+        upper_curve_l = sketch.addGeometry(upper_curve_geometry_l)
+        upper_curve_r = sketch.addGeometry(upper_curve_geometry_r)
+        self.constrain_to_point(sketch, upper_curve_l, 1, start_point)
+        self.constrain_to_point(sketch, upper_curve_l, 2, end_point)
+        self.constrain_to_point(sketch, upper_curve_r, 2, mirror(start_point))
+        self.constrain_to_point(sketch, upper_curve_r, 1, mirror(end_point))
+
+        #start_point = upper_curve_geometry_l.StartPoint
+        #end_point = upper_curve_geometry_r.EndPoint
+        start_point = curve_top
+        end_point = mirror(curve_top)
+        deck_geometry = Part.LineSegment(start_point, end_point)
+        deck = sketch.addGeometry(deck_geometry)
+        self.constrain_to_point(sketch, deck, 1, start_point)
+        self.constrain_to_point(sketch, deck, 2, end_point)
 
         return sketch
+
+    def constrain_to_point(self, sketch, edge, point_of_edge, point):
+        sketch.addConstraint(Sketcher.Constraint('DistanceX', edge, point_of_edge, -1, 1, -point.x))
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', edge, point_of_edge, -1, 1, -point.y))
 
     def loft(self):
         additive_loft = self.hull.newObject('PartDesign::AdditiveLoft', f"hull_loft")
         additive_loft.Ruled = True
 
-        for _, cross_section in self.cross_sections:
+        for cross_section in self.cross_sections.values():
           if not additive_loft.Profile:
             additive_loft.Profile = cross_section
           else:
             additive_loft.Sections += [cross_section]
 
 
-    @classmethod
-    def get_intersection(cls, sketch, plane):
-        return sketch.Shape.section(plane)
-      #for edge in sketch.Shape.Edges:
-      #  points = plane.Surface.intersect(edge.Curve)
-      #  if not points:
-      #    continue
-      #  for point in points[0]:
-      #    if (plane.isInside(Vector(point.X, point.Y, point.Z), 0.01, True) and 
-      #    edge.isInside(Vector(point.X, point.Y, point.Z), 0.01, True)):
-      #      return point
-      #return None
+def mirror(point):
+    """ Mirror about the center line. """
+    return App.Vector(-point.x, point.y, point.z)
 
 def get_dimension(doc, label: str) -> Any:
     dimensions = doc.getObjectsByLabel('dimensions')[0]
