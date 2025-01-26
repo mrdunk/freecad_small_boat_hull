@@ -22,6 +22,7 @@ class Slice_Base(list):
   section_positions = []
 
   def __init__(self, doc, hull_body, intersection_count = None, section_positions = []):
+    print(f"Calculating {self.__class__.__name__}")
     self.doc = doc
     self.hull_body = hull_body
     self.intersection_count = intersection_count
@@ -34,9 +35,21 @@ class Slice_Base(list):
   def _setup_section_positions(self):
     bound_box = self.hull_body.Shape.BoundBox
 
-    self.slice_start = bound_box.ZMin
-    slice_range = bound_box.ZLength
+    if self.plane.x:
+      self.slice_start = bound_box.XMin
+      slice_range = bound_box.XLength
+    elif self.plane.y:
+      self.slice_start = bound_box.YMin
+      slice_range = bound_box.YLength
+    elif self.plane.z:
+      self.slice_start = bound_box.ZMin
+      slice_range = bound_box.ZLength
     self.slice_width = slice_range / (self.intersection_count + 1)
+
+    self.section_positions = [
+          self.slice_start + (i * self.slice_width) + 0.1
+          for i in range(self.intersection_count + 1)
+        ]
 
   def slice(self):
     if not self.section_positions:
@@ -111,27 +124,13 @@ class Slice_CrossSection(Slice_Base):
         self.section_positions.append(rib_position)
         index += 1
 
+
 class Slice_Waterline(Slice_Base):
   plane = App.Vector(0, 0, 1)
-
-  def _setup_section_positions(self):
-    bound_box = self.hull_body.Shape.BoundBox
-
-    self.slice_start = bound_box.ZMin
-    slice_range = bound_box.ZLength
-    self.slice_width = slice_range / (self.intersection_count + 1)
 
 
 class Slice_Profile(Slice_Base):
   plane = App.Vector(1, 0, 0)
-
-  def _setup_section_positions(self):
-    bound_box = self.hull_body.Shape.BoundBox
-
-    self.slice_start = bound_box.XMin
-    slice_range = bound_box.XLength
-    self.slice_width = slice_range / (self.intersection_count + 1)
-
 
 
 class Slice_Diagonals(Slice_Base):
@@ -539,10 +538,12 @@ class Components:
 
     fatten = 0.1
     for d, normal in self.diagonal_normals():
+      print(f"Drawing stringer. {normal}")
       # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
       # issues later due to faces being in the same place on identical planes.
       pattern = d.copy().translate(normal.cross(-App.Vector(0, 1, 0)) * (fatten / 2))
-      pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
+      #pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
+      pattern = pattern.extrude(normal.cross(App.Vector(0, 1, 0)) * (stringer_depth + Units.Quantity(f"{fatten}mm")))
       pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
       stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
 
@@ -550,8 +551,10 @@ class Components:
       # Since the plane of each stringer's curve is at a different angle to the main
       # hull it would be hard to calculate the correct shape for each notch.
       # Instead, this stringer extends all the way out of the notch so we can do a boolean cut.
-      pattern_deep = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
-      pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
+      #pattern_deep = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
+      #pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
+      pattern_deep = d.copy().translate(normal.cross(App.Vector(0, 1, 0)) * stringer_depth)
+      pattern_deep = pattern_deep.extrude(normal.cross(-App.Vector(0, 1, 0)) * stringer_depth * 3)
       pattern_deep.translate(normal.normalize() * stringer_width / 2)
       stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
 
@@ -569,6 +572,8 @@ class Components:
 
       self.stringers.append(stringer)
       self.stringers_deep.append(stringer_deep)
+      #Part.show(stringer, "stringer")
+      #Part.show(stringer_deep, "stringer_deep")
 
     # set up the group to store the displayed stringers in later.
     self.stringers_group = create_group(doc, f"stringers")
@@ -596,6 +601,8 @@ class Components:
     gunwale_deep_offset = gunwale_deep_wire.extrude(App.Vector(0, 0, 1) * -stringer_width.Value * 2)
     gunwale_deep_solid = gunwale_deep_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth.Value * 2)
     self.stringers_deep.append(gunwale_deep_solid)
+    #Part.show(gunwale_solid, "gunwale_solid")
+    #Part.show(gunwale_deep_solid, "gunwale_deep_solid")
 
   def draw_rib(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -610,6 +617,7 @@ class Components:
     thwart_height = dimensions.get("thwart_height").Value
     low_thwart_height = dimensions.get("low_thwart_height").Value
     deck_width = dimensions.get("deck_width")
+    deck_height = dimensions.get("deck_height")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
 
     if rib_type == "thwart_narrow":
@@ -643,17 +651,27 @@ class Components:
     # Calculate a new rib outline, curving parts between stringers away from hull's skin.
     previous = bottom_center.Point
     new_rib_parts = []
-    for rib_part in rib_parts.Edges:
+    # Iterate parts we want rib edge to go through, from lowest part to highest.
+    for rib_part in sorted(rib_parts.Edges, key = lambda edge: edge.BoundBox.ZMin):
+      #Part.show(rib_part, "rib_part")
+
+      # Sort Vertexes from lowest to highest.
+      vertexes = sorted(rib_part.Vertexes, key=lambda vertex: vertex.Point.z)
+
+      if abs(vertexes[0].Point.z - vertexes[-1].Point.z) < 1e-3:
+        # Line section is horizontal. Must be part of the deck so we are done.
+        break
+
       if previous is None:
         # First time through.
-        previous = rib_part.Vertexes[-1].Point
+        previous = vertexes[-1].Point
         new_rib_parts.append(rib_part)
         continue
 
-      vertex = rib_part.Vertexes[0].Point
+      vertex = vertexes[0].Point
       if previous == vertex:
         # Sections are separate edges.
-        previous = rib_part.Vertexes[-1].Point
+        previous = vertexes[-1].Point
         new_rib_parts.append(rib_part)
         continue
 
@@ -662,25 +680,31 @@ class Components:
       cross = (diff / 2).cross(App.Vector(0, 1, 0))
       new = (previous + vertex) / 2 + cross
       arc = Part.Arc(previous, new, vertex).toShape()
-      previous = rib_part.Vertexes[-1].Point
+      previous = vertexes[-1].Point
       new_rib_parts.append(arc)
       new_rib_parts.append(rib_part)
     outer_rib_wire = Part.Wire(new_rib_parts)
     #Part.show(outer_rib_wire, "outer_rib_wire")
 
     inner_rib_wire = rib_wire.makeOffset2D(-rib_depth, openResult = True, fill = False)
-    inner_rib_wire = simplify_arcs(inner_rib_wire)
-    #Part.show(inner_rib_wire, "inner_rib_wire")
+    print(f"{inner_rib_wire.BoundBox=}")
+    boundary = Part.makeBox(inner_rib_wire.BoundBox.XLength, inner_rib_wire.BoundBox.YLength, inner_rib_wire.BoundBox.ZLength,
+                            App.Vector(0, inner_rib_wire.BoundBox.YMin, inner_rib_wire.BoundBox.ZMin))
+    print(f"{boundary.BoundBox=}")
+    section = inner_rib_wire.common(boundary)
+    inner_rib_wire = section.Wires[0]
 
     outer_ends = get_wire_ends(outer_rib_wire)
     inner_ends = get_wire_ends(inner_rib_wire)
-    bottom = Part.makeLine(outer_ends[0], inner_ends[0])
-    top = Part.makeLine(inner_ends[1], outer_ends[1])
+
+    bottom = Part.makeLine(outer_ends[0], inner_ends[-1])
+    top = Part.makeLine(inner_ends[0], outer_ends[-1])
     inner_rib_wire.add(top)
     inner_rib_wire.add(bottom)
     rib_wire = Part.Wire([inner_rib_wire, outer_rib_wire], closed = True)
     #Part.show(rib_wire, "rib_wire")
     rib_face = Part.Face(rib_wire)
+
 
     if abs(rib_wire.BoundBox.XMax) > rib_depth * 2:
       # Big enough to fit thwarts in.
@@ -701,12 +725,16 @@ class Components:
 
       for edge in rib_wire.Edges:
         common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
+        point_center = App.Vector(0.0, float(rib_position), thwart_height)
         for point in common:
-          thwart_edge = Part.makeLine(point, App.Vector(0.0, float(rib_position), thwart_height))
+          if point != point_center:
+            thwart_edge = Part.makeLine(point, point_center)
 
         common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
+        point_center = App.Vector(brace_width / 2, float(rib_position), thwart_height)
         for point in common:
-          brace_edge = Part.makeLine(point, App.Vector(brace_width / 2, float(rib_position), thwart_height))
+          if point != point_center:
+            brace_edge = Part.makeLine(point, point_center)
 
       if thwart_edge:
         thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * rib_thwart_depth)
@@ -897,7 +925,6 @@ class Components:
 
   def mirror_sides(self):
     for rib_position, rib in self.ribs.items():
-      print(rib_position, rib)
       rib_mirrored = rib.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       rib = rib.fuse(rib_mirrored)
       rib = rib.removeSplitter()
@@ -906,7 +933,6 @@ class Components:
       self.components_flat[name] = rib
 
     for stringer in self.stringers:
-      print(stringer)
       stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       #stringer = stringer.fuse(stringer_mirrored)
       name = f"stringer_{round(stringer.BoundBox.ZMin)}"
@@ -1122,25 +1148,12 @@ def perpendicular(wire, position):
 
 def get_wire_ends(wire):
   """ Gets ends of a wire. Returns a list of any vertexes in a wire with only one connection. """
-  points = {}
-  for edge in wire.Edges:
-    first = edge.firstVertex().Point
-    first_hash = (first.x, first.y, first.z)
-    if first_hash not in points:
-      points[first_hash] = 0
-    points[first_hash] += 1
-
-    last = edge.lastVertex().Point
-    last_hash = (last.x, last.y, last.z)
-    if last_hash not in points:
-      points[last_hash] = 0
-    points[last_hash] += 1
-
-  ends = []
-  for point, count in points.items():
-    if count == 1:
-      ends.append(App.Vector(point))
-  return sorted(ends, key=lambda point: point.z)
+  end_points = []
+  for vertex in wire.Vertexes:
+      if len(wire.ancestorsOfType(vertex, Part.Edge)) == 1:
+          end_points.append(vertex.Point)
+          
+  return end_points
 
 def simplify_arcs(wire: Part.Wire) -> Part.Wire:
   """ Rewrite any Part::GeomOffsetCurve shapes as simple Arc and Lines."""

@@ -33,8 +33,11 @@ class Hull:
         self.doc.recompute()
         self.boat.addObject(self.hull)
         self.doc.recompute()
+        Gui.activateView('Gui::View3DInventor', True)
+        Gui.activeView().setActiveObject('pdbody', self.hull)
 
         # Templates outlining hull shape.
+        sketch_cross_section = self.doc.getObjectsByLabel('cross_section_template')[0]
         sketch_profile_deck = self.doc.getObjectsByLabel('profile_deck')[0]
         sketch_profile_keel = self.doc.getObjectsByLabel('profile_keel')[0]
         sketch_plan_deck = self.doc.getObjectsByLabel('plan_deck')[0]
@@ -52,11 +55,12 @@ class Hull:
         self.highest = max(prow_height, stern_height)
         section_count = get_dimension(self.doc, "section_count")
         highest = deck_height + max(prow_height, stern_height)
+        deadrise_radius = sketch_cross_section.Geometry[0].Radius
 
         logger.info(f"Calculating {section_count} cross sections")
 
         # Create an initial template to work out the deadrise curve radius.
-        deadrise_radius = self.draw_template(deck_width / 2, deck_height, deck_width / 4, deck_height.Value + 40, 0)
+        #deadrise_radius = self.draw_template(deck_width / 2, deck_height, deck_width / 4, deck_height.Value + 40, 0)
 
         self.cross_sections = {}
         section_pos = -self.deck_length.Value / 2
@@ -71,12 +75,14 @@ class Hull:
             print(section_count, section_pos, working_section_pos)
 
             # intersect outline drawings to find section dimensions.
-            intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, -working_section_pos, 0), App.Vector(0, 1, 0))
+            intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, working_section_pos, 0), App.Vector(0, 1, 0))
             deck_plan_intersection = sketch_plan_deck.Shape.section(intersection_plane).Vertexes[0].X
             deck_height_intersection = sketch_profile_deck.Shape.section(intersection_plane).Vertexes[0].Z
             keel_height_intersection = sketch_profile_keel.Shape.section(intersection_plane).Vertexes[0].Z
             hull_curve_height_intersection = sketch_hull_curve_height.Shape.section(intersection_plane).Vertexes[0].Z
+            hull_curve_height_intersection = max(deck_height_intersection, hull_curve_height_intersection)
             hull_curve_horizontal_intersection = sketch_hull_curve_horizontal.Shape.section(intersection_plane).Vertexes[0].X
+            hull_curve_horizontal_intersection = min(0, hull_curve_horizontal_intersection)
 
             section_label = f"rib_{round(working_section_pos, 0)}"
             print(section_label, index)
@@ -131,7 +137,7 @@ class Hull:
 
         self.constrain_to_point(sketch, deadrise, 2, origin)
         self.constrain_to_point(sketch, upper_curve, 1, curve_top)
-        self.constrain_to_point(sketch, upper_curve, 3, upper_curve_center)
+        #self.constrain_to_point(sketch, upper_curve, 3, upper_curve_center)
 
         self.doc.recompute()
 
@@ -203,7 +209,8 @@ class Hull:
         up = App.Vector(1, 0, 0)
         truncate_curve = False
 
-        if join_point.y > curve_top.y or abs(join_point.x) > abs(curve_top.x):
+        #if join_point.y > curve_top.y or abs(join_point.x) > abs(curve_top.x) or join_point.y < origin.y:
+        if join_point.y > curve_top.y or join_point.y < origin.y:
             # Top curve is entirely above the deck
             # or
             # op of top curve is narrower than widest point.
@@ -235,8 +242,6 @@ class Hull:
         if truncate_curve:
             # Short straight line at the top to keep number of elements the same even though
             # the original curve would have been entirely above deck height.
-            #start_point = deadrise_geometery_l.StartPoint + App.Vector(0, 1, 0)
-            #end_point = deadrise_geometery_l.StartPoint
             start_point = curve_top
             end_point = join_point
             upper_curve_geometry_l = Part.LineSegment(start_point, end_point)
@@ -255,14 +260,14 @@ class Hull:
         self.constrain_to_point(sketch, upper_curve_r, 2, mirror(start_point))
         self.constrain_to_point(sketch, upper_curve_r, 1, mirror(end_point))
 
-        #start_point = upper_curve_geometry_l.StartPoint
-        #end_point = upper_curve_geometry_r.EndPoint
         start_point = curve_top
         end_point = mirror(curve_top)
         deck_geometry = Part.LineSegment(start_point, end_point)
         deck = sketch.addGeometry(deck_geometry)
         self.constrain_to_point(sketch, deck, 1, start_point)
         self.constrain_to_point(sketch, deck, 2, end_point)
+
+        print(f"\t{origin=} {join_point=} {curve_top=}")
 
         return sketch
 
@@ -306,6 +311,7 @@ def remove_group(doc, name):
         OpenSCADUtils.removesubtree(group)
       except TypeError:
         group.removeObjectsFromDocument()
+        doc.getObject(group.Name).removeObjectsFromDocument()
         doc.removeObject(group.Name)
 
 def create_group(doc, name, element_type='App::DocumentObjectGroup'):
