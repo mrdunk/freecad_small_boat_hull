@@ -376,9 +376,9 @@ class Plans:
     group_body = create_group(doc, plan_body_name)
     group_waterline = create_group(doc, plan_waterline_name)
 
-    offset_plan_profile = 1000
-    offset_plan_body = 2000
-    offset_plan_waterline = 3500
+    offset_plan_profile = 2000
+    offset_plan_body = 3000
+    offset_plan_waterline = 4500
 
     label = f"{parent_name}__wireframe_profile"
     if has_object_by_label(doc, label):
@@ -424,6 +424,8 @@ class Plans:
           self.draw_line(shape.Shape, App.Vector(0, 0, 1), offset_plan_waterline, group_waterline, True, True)
           self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, False)
           self.draw_line(shape.Shape, App.Vector(0, 1, 0), offset_plan_body, group_body, False, True)
+
+    self.extra(group_profile, offset_plan_profile)
 
     Gui.Selection.clearSelection()
     addSelection(self.doc, f"{parent_name}__plan_profile")
@@ -472,6 +474,25 @@ class Plans:
       FreeCADGui.getDocument(self.doc.Name).getObject(new.Name).PointSize = 1
 
     group.addObjects([new])
+
+  def extra(self, group, offset_plan_profile):
+    sketches = [
+        doc.getObjectsByLabel('dagger_board')[0],
+        doc.getObjectsByLabel('rudder')[0],
+        doc.getObjectsByLabel('skeg')[0],
+        ]
+
+    for sketch in sketches:
+      direction = App.Vector(1, 0, 0)
+      shape = sketch.Shape
+
+      outline, _, _, _ = TechDraw.project(shape, direction)
+      new = Part.show(outline, "outline")
+      new.Placement = App.Placement(
+          App.Vector(offset_plan_profile, 0, 0),
+          direction, 180)
+
+      group.addObjects([new])
 
 
 class Components:

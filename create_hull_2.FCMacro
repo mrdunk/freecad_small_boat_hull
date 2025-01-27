@@ -59,9 +59,6 @@ class Hull:
 
         logger.info(f"Calculating {section_count} cross sections")
 
-        # Create an initial template to work out the deadrise curve radius.
-        #deadrise_radius = self.draw_template(deck_width / 2, deck_height, deck_width / 4, deck_height.Value + 40, 0)
-
         self.cross_sections = {}
         section_pos = -self.deck_length.Value / 2
         step_len = self.deck_length.Value / (section_count - 1)
@@ -113,6 +110,7 @@ class Hull:
         self.loft()
 
     def draw_template(self, deck_width, deck_height, curve_width, curve_height, keel_height):
+        """ Not used. Would create a base cross section template. """
         print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=}")
         plane = self.doc.getObjectsByLabel("XY-plane")[0]
 
@@ -137,7 +135,6 @@ class Hull:
 
         self.constrain_to_point(sketch, deadrise, 2, origin)
         self.constrain_to_point(sketch, upper_curve, 1, curve_top)
-        #self.constrain_to_point(sketch, upper_curve, 3, upper_curve_center)
 
         self.doc.recompute()
 
