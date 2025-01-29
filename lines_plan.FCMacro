@@ -536,6 +536,8 @@ class Components:
 
     self.mirror_sides()
 
+    self.draw_deck()
+
   def index_ribs(self, shape, ribs_data):
     y_pos = str(round(shape.BoundBox.YMin))
     if y_pos not in ribs_data:
@@ -557,29 +559,38 @@ class Components:
 
     hull = self.hull.copy()
 
-    fatten = 0.1
+    fatten = 1
     for d, normal in self.diagonal_normals():
       print(f"Drawing stringer. {normal}")
+
+      ordered_vertexes = d.Wires[0].OrderedVertexes
+      a = ordered_vertexes[0].Point
+      b = ordered_vertexes[int(len(ordered_vertexes) / 2)].Point
+      c = ordered_vertexes[-1].Point
+      curvature = (a -b).cross(b - c).z
+      if curvature < 0:
+        d.reverse()
+
       # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
       # issues later due to faces being in the same place on identical planes.
-      pattern = d.copy().translate(normal.cross(-App.Vector(0, 1, 0)) * (fatten / 2))
-      #pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
-      pattern = pattern.extrude(normal.cross(App.Vector(0, 1, 0)) * (stringer_depth + Units.Quantity(f"{fatten}mm")))
+      pattern = d.copy()
       pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
+      pattern = pattern.makeOffset2D(fatten / 2, openResult = True, fill = False)
+      pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
       stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
 
       # This deeper version of the stringer cuts the full notch out of the rib.
       # Since the plane of each stringer's curve is at a different angle to the main
       # hull it would be hard to calculate the correct shape for each notch.
       # Instead, this stringer extends all the way out of the notch so we can do a boolean cut.
-      #pattern_deep = d.copy().makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
-      #pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
-      pattern_deep = d.copy().translate(normal.cross(App.Vector(0, 1, 0)) * stringer_depth)
-      pattern_deep = pattern_deep.extrude(normal.cross(-App.Vector(0, 1, 0)) * stringer_depth * 3)
+      pattern_deep = d.copy()
       pattern_deep.translate(normal.normalize() * stringer_width / 2)
+      pattern_deep = pattern_deep.makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
+      pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
       stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
 
       if int(accurate_stringers):
+        stringer_original = stringer.copy()
         # Since the main stringer's outer face is likely to be collinear with the hull's outer surface,
         # bugs when performing the boolean operation to shape the outer face of the stringer to match
         # the outer face of the hull.
@@ -590,6 +601,11 @@ class Components:
         # This knocks off the sharp corner of the stringer that protrudes through the hull surface.
         # In real life, we'll use a plane.
         stringer = stringer_hull.common(stringer)
+
+        if stringer.BoundBox.XLength < 1e-4 or stringer.BoundBox.XLength > 1e10:
+          print("WARN: Problem with stringer geometry.")
+          # Fall back to raw (un-chamfered) shape.
+          stringer = stringer_original
 
       self.stringers.append(stringer)
       self.stringers_deep.append(stringer_deep)
@@ -708,10 +724,8 @@ class Components:
     #Part.show(outer_rib_wire, "outer_rib_wire")
 
     inner_rib_wire = rib_wire.makeOffset2D(-rib_depth, openResult = True, fill = False)
-    print(f"{inner_rib_wire.BoundBox=}")
     boundary = Part.makeBox(inner_rib_wire.BoundBox.XLength, inner_rib_wire.BoundBox.YLength, inner_rib_wire.BoundBox.ZLength,
                             App.Vector(0, inner_rib_wire.BoundBox.YMin, inner_rib_wire.BoundBox.ZMin))
-    print(f"{boundary.BoundBox=}")
     section = inner_rib_wire.common(boundary)
     inner_rib_wire = section.Wires[0]
 
@@ -758,7 +772,7 @@ class Components:
             brace_edge = Part.makeLine(point, point_center)
 
       if thwart_edge:
-        thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * rib_thwart_depth)
+        thwart_face = thwart_edge.extrude(App.Vector(0, 0, 1) * -rib_thwart_depth)
         rib_face = rib_face.fuse(thwart_face)
 
       if brace_edge:
@@ -803,16 +817,21 @@ class Components:
 
   def chamfer_rib_hole(self, rib_face, rib_chamfer_radius, deck_width):
     inner_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[0]
+    # Remove too short edges.
+    inner_wire = Part.Wire(list(filter(lambda edge: edge.Length > 1e-4, inner_wire.Edges)))
+
     outer_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[-1]
     outer_face = Part.Face(outer_wire)
 
     try:
       offset = inner_wire.makeOffset2D(-rib_chamfer_radius, openResult = False, fill = False)
     except:
-      print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value.")
-      return rib_face
-    #Part.show(inner_wire, "inner_wire")
-    #Part.show(offset, "offset")
+      inner_wire.reverse()
+      try:
+        offset = inner_wire.makeOffset2D(-rib_chamfer_radius, openResult = False, fill = False)
+      except:
+        print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value. A")
+        return rib_face
 
     previous = offset.Edges[-1]
     for offset_edge in offset.Edges:
@@ -829,7 +848,7 @@ class Components:
         common = offset_edge.Vertexes[-1].Point
         other = (offset_edge.Vertexes[0].Point, previous.Vertexes[0].Point)
       else:
-        print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value.")
+        print("WARN: Failed to fillet rib. Try reducing 'rib_chamfer_radius' value. B")
         continue
       previous = offset_edge
 
@@ -970,6 +989,22 @@ class Components:
     for diagonal_edge in diagonal.Edges:
       return diagonal_edge.Curve.toShape().findPlane().Axis
     return None
+
+  def draw_deck(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    thwart_height = dimensions.get("thwart_height")
+    stringer_depth = dimensions.get("stringer_depth")
+    deck_thickness = dimensions.get("deck_thickness")
+    plane = Part.Plane(App.Vector(0, 0, thwart_height), App.Vector(0, 0, 1))
+    outline = self.hull.common(plane)
+    outline = outline.Wires[0].makeOffset2D(-stringer_depth, False, False)
+    face = Part.Face(outline)
+    full_deck = face.extrude(App.Vector(0, 0, 6))
+
+    group_component = create_group(doc, f"full_deck")
+    self.group.addObjects([group_component])
+    group_component.addObjects([ Part.show(full_deck) ])
+    self.components_flat["full_deck"] = full_deck
 
 
 class Mass:
