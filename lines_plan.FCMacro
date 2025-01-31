@@ -758,11 +758,14 @@ class Components:
       thwart_edge = None
       brace_edge = None
 
+      best_thwart_edge_point = None
       for edge in rib_wire.Edges:
         common = DraftGeomUtils.findIntersection(rib_intersection_height, edge)
         point_center = App.Vector(0.0, float(rib_position), thwart_height)
         for point in common:
-          if point != point_center:
+          if point != point_center and (best_thwart_edge_point is None or point.x < best_thwart_edge_point.x):
+            # This is the point on the inside of the rib, not the outside, nearest the hull's outer skin.
+            best_thwart_edge_point = point
             thwart_edge = Part.makeLine(point, point_center)
 
         common = DraftGeomUtils.findIntersection(rib_intersection_bottom, edge)
@@ -975,7 +978,7 @@ class Components:
     for stringer in self.stringers:
       stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       #stringer = stringer.fuse(stringer_mirrored)
-      name = f"stringer_{round(stringer.BoundBox.ZMin)}"
+      name = f"stringer_{round(stringer.BoundBox.YMin)}"
       name_port = f"{name}_port"
       name_starboard = f"{name}_starboard"
       self.stringers_group.addObjects([
@@ -995,20 +998,48 @@ class Components:
     thwart_height = dimensions.get("thwart_height")
     stringer_depth = dimensions.get("stringer_depth")
     deck_thickness = dimensions.get("deck_thickness")
+    deck_width = dimensions.get("deck_width")
+    rib_width = dimensions.get("rib_width")
+
+    deck_section_indexes = [
+        (0, 2),
+        (3, 4),
+        (6, 8)
+        ]
+
+    rib_positions = []
+    index = 0
+    while True:
+      rib_pos_label = f"rib_positions_{index}"
+      try:
+        rib_position = dimensions.get(rib_pos_label)
+      except ValueError:
+        break
+      rib_positions.append(rib_position)
+      index += 1
+
     plane = Part.Plane(App.Vector(0, 0, thwart_height), App.Vector(0, 0, 1))
     outline = self.hull.common(plane)
     outline = outline.Wires[0].makeOffset2D(-stringer_depth, False, False)
     face = Part.Face(outline)
     full_deck = face.extrude(App.Vector(0, 0, 6))
 
-    group_component = create_group(doc, f"full_deck")
+    group_component = create_group(doc, f"deck")
     self.group.addObjects([group_component])
-    group_component.addObjects([ Part.show(full_deck) ])
-    self.components_flat["full_deck"] = full_deck
+
+    for index_start, index_end in deck_section_indexes:
+      mask_len = rib_positions[index_end] - rib_positions[index_start] + rib_width.Value
+      mask = Part.makeBox(deck_width, mask_len, deck_thickness * 2, App.Vector(-deck_width / 2, rib_positions[index_start] - rib_width.Value / 2, thwart_height))
+      deck_part = mask.common(full_deck.copy())
+      group_component.addObjects([ Part.show(deck_part, f"dec_section_{index_start}_{index_end}") ])
+      self.components_flat[f"deck_{index_start}_{index_end}"] = deck_part
 
 
 class Mass:
   def __init__(self, doc, components: Components):
+    print(components.components_flat)
+    print(components.components_bulk)
+
     self.doc = doc
     self.components = components
 
@@ -1022,7 +1053,7 @@ class Mass:
     flat_volume_m3 = round(flat_volume / 1e9, 5)
     bulk_volume_m3 = round(bulk_volume / 1e9, 5)
     print(
-        f"pine:    {bulk_volume_m3:4.3f}m³ {flat_volume_m3 * pine_density:4.2f}kg")
+        f"pine:    {flat_volume_m3:4.3f}m³ {flat_volume_m3 * pine_density:4.2f}kg")
     print(
         f"plywood: {bulk_volume_m3:4.3f}m³ {bulk_volume_m3 * plywood_density:4.2f}kg")
 
@@ -1208,7 +1239,7 @@ def get_wire_ends(wire):
   for vertex in wire.Vertexes:
       if len(wire.ancestorsOfType(vertex, Part.Edge)) == 1:
           end_points.append(vertex.Point)
-          
+
   return end_points
 
 def simplify_arcs(wire: Part.Wire) -> Part.Wire:
