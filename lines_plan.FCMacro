@@ -563,30 +563,25 @@ class Components:
     for d, normal in self.diagonal_normals():
       print(f"Drawing stringer. {normal}")
 
-      ordered_vertexes = d.Wires[0].OrderedVertexes
-      a = ordered_vertexes[0].Point
-      b = ordered_vertexes[int(len(ordered_vertexes) / 2)].Point
-      c = ordered_vertexes[-1].Point
-      curvature = (a -b).cross(b - c).z
-      if curvature < 0:
+      if get_wire_curvature(d.Wires[0]) < 0:
         d.reverse()
 
       # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
       # issues later due to faces being in the same place on identical planes.
-      pattern = d.copy()
+      pattern = clean_wire2(d.copy())
       pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
       pattern = pattern.makeOffset2D(fatten / 2, openResult = True, fill = False)
-      pattern = pattern.makeOffset2D(-(stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
+      pattern = pattern.makeOffset2D((stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
       stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
 
       # This deeper version of the stringer cuts the full notch out of the rib.
       # Since the plane of each stringer's curve is at a different angle to the main
       # hull it would be hard to calculate the correct shape for each notch.
       # Instead, this stringer extends all the way out of the notch so we can do a boolean cut.
-      pattern_deep = d.copy()
+      pattern_deep = clean_wire2(d.copy())
       pattern_deep.translate(normal.normalize() * stringer_width / 2)
-      pattern_deep = pattern_deep.makeOffset2D(stringer_depth * 2, openResult = True, fill = False)
-      pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 3, openResult = True, fill = True)
+      pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 2, openResult = True, fill = False)
+      pattern_deep = pattern_deep.makeOffset2D(stringer_depth * 3, openResult = True, fill = True)
       stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
 
       if int(accurate_stringers):
@@ -908,7 +903,10 @@ class Components:
     section = box.common(profile_keel.Shape)
     section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
 
-    offset = section.makeOffset2D(stem_depth, openResult = True, fill = True)
+    if get_wire_curvature(section.Wires[0]) > 0:
+      section.reverse()
+
+    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
     part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_width)
 
     group_component = create_group(doc, f"stem")
@@ -954,11 +952,10 @@ class Components:
     section = box.common(profile_keel.Shape)
     section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
 
-    offset = section.makeOffset2D(keelson_width, openResult = True, fill = True)
+    offset = section.extrude(App.Vector(1, 0, 0) * keelson_width)
     part_3d = offset.extrude(App.Vector(0, 0, 1) * keelson_depth)
 
-    if int(accurate_stringers) or True:
-      part_3d = part_3d.common(self.hull)
+    part_3d = part_3d.common(self.hull)
 
     group_component = create_group(doc, f"keelson")
     self.group.addObjects([group_component])
@@ -990,7 +987,9 @@ class Components:
   @classmethod
   def diagonal_normal_at(cls, diagonal, point):
     for diagonal_edge in diagonal.Edges:
-      return diagonal_edge.Curve.toShape().findPlane().Axis
+      plane = diagonal_edge.Curve.toShape().findPlane()
+      if plane:
+        return plane.Axis
     return None
 
   def draw_deck(self):
@@ -1019,10 +1018,16 @@ class Components:
       index += 1
 
     plane = Part.Plane(App.Vector(0, 0, thwart_height), App.Vector(0, 0, 1))
-    outline = self.hull.common(plane)
-    outline = outline.Wires[0].makeOffset2D(-stringer_depth, False, False)
-    face = Part.Face(outline)
-    full_deck = face.extrude(App.Vector(0, 0, 6))
+    deck_plan = self.hull.common(plane)
+
+    outline = clean_wire(deck_plan)
+    #Part.show(outline, "outline")
+    offset = outline.makeOffset2D(-stringer_depth, openResult = False)
+    #Part.show(offset, "offset")
+
+    face = Part.Face(offset)
+    full_deck = face.extrude(App.Vector(0, 0, deck_thickness))
+    #Part.show(full_deck, "full_deck")
 
     group_component = create_group(doc, f"deck")
     self.group.addObjects([group_component])
@@ -1254,6 +1259,44 @@ def simplify_arcs(wire: Part.Wire) -> Part.Wire:
   modified_edges = Part.sortEdges(modified_edges)[0]
   return Part.Wire(modified_edges)
 
+def get_wire_curvature(wire):
+  ordered_vertexes = wire.OrderedVertexes
+  a = ordered_vertexes[0].Point
+  b = ordered_vertexes[int(len(ordered_vertexes) / 2)].Point
+  c = ordered_vertexes[-1].Point
+  curvature = (a -b).cross(b - c).z
+  return curvature
+
+def clean_wire(wire):
+  """ Turn wire with Curves as edges into straight lines as edges. """
+  # Join all curves into one.
+  combined_curve = None
+  for index, edge in enumerate(wire.Edges):
+    if combined_curve is None:
+      combined_curve = edge.Curve.copy()
+    else:
+      combined_curve.join(edge.Curve.copy())
+
+  # Split curve into Vertexes and make lines from them.
+  last_point = None
+  edges = []
+  for point in combined_curve.discretize(Angular=0.5, Curvature=0.1):
+    if last_point is not None:
+      edges.append(Part.LineSegment(last_point, point).toShape())
+    last_point = point
+
+  return Part.Wire(edges)
+
+def clean_wire2(wire):
+  edges = []
+  start_point = None
+  for index, edge in enumerate(wire.Edges):
+    if start_point:
+      edges.append(Part.LineSegment(start_point, edge.valueAt(edge.LastParameter)).toShape())
+    start_point = edge.valueAt(edge.LastParameter)
+
+  wire = Part.Wire(edges)
+  return wire
 
 doc = App.ActiveDocument
 body = get_body()
