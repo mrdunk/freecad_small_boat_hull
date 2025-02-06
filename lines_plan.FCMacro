@@ -815,6 +815,11 @@ class Components:
 
   def chamfer_rib_hole(self, rib_face, rib_chamfer_radius, deck_width):
     inner_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[0]
+    if inner_wire.BoundBox.XLength < 2 * rib_chamfer_radius or inner_wire.BoundBox.ZLength < 2 * rib_chamfer_radius:
+      # Holes too small to care about. Remove them.
+      rib_face.removeInternalWires((4 * rib_chamfer_radius) ** 2)
+      return rib_face
+
     # Remove too short edges.
     inner_wire = Part.Wire(list(filter(lambda edge: edge.Length > 1e-4, inner_wire.Edges)))
 
@@ -889,25 +894,14 @@ class Components:
     return rib_face
 
   def draw_stem(self):
-    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     deck_length = dimensions.get("deck_length")
-    prow_height = dimensions.get("prow_height")
-    keelson_length = dimensions.get("keelson_length")
-    stem_depth = dimensions.get("stem_depth")
-    stem_overlap = dimensions.get("stem_overlap")
-    rib_width = dimensions.get("rib_width")
-    stem_length = (deck_length - keelson_length) / 2 + stem_overlap
+    stem_length = dimensions.get("stem_length")
 
-    box = Part.makeBox(2, stem_length, prow_height, App.Vector(-1, -deck_length / 2, 0), App.Vector(0, 0, 1))
-    section = box.common(profile_keel.Shape)
-    section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
+    min_y = -deck_length.Value/ 2
+    max_y = -deck_length.Value/ 2 + stem_length.Value
 
-    if get_wire_curvature(section.Wires[0]) > 0:
-      section.reverse()
-
-    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
-    part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_width)
+    part_3d = self.draw_stem_stern(min_y, max_y)
 
     group_component = create_group(doc, f"stem")
     self.group.addObjects([group_component])
@@ -916,22 +910,14 @@ class Components:
     self.components_flat["stem"] = part_3d
 
   def draw_stern(self):
-    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     deck_length = dimensions.get("deck_length")
-    prow_height = dimensions.get("prow_height")
-    keelson_length = dimensions.get("keelson_length")
-    stem_overlap = dimensions.get("stem_overlap")
-    stem_depth = dimensions.get("stem_depth")
-    rib_width = dimensions.get("rib_width")
-    stern_length = (deck_length - keelson_length) / 2 + stem_overlap
+    stern_length = dimensions.get("stern_length")
 
-    box = Part.makeBox(2, stern_length, prow_height, App.Vector(-1, deck_length / 2 - stern_length, 0), App.Vector(0, 0, 1))
-    section = box.common(profile_keel.Shape)
-    section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
+    min_y = deck_length.Value / 2 - stern_length.Value
+    max_y = deck_length.Value / 2 + 10
 
-    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
-    part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_width)
+    part_3d = self.draw_stem_stern(min_y, max_y)
 
     group_component = create_group(doc, f"stern")
     self.group.addObjects([group_component])
@@ -939,8 +925,51 @@ class Components:
     self.stern = part_3d
     self.components_flat["stern"] = part_3d
 
-  def draw_keelson(self):
+  def draw_stem_stern(self, min_y, max_y):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    stem_depth = dimensions.get("stem_depth")
+    rib_width = dimensions.get("rib_width")
+    max_z = self.hull.BoundBox.ZMax
+    min_z = 0
+
+    box = Part.makeBox(2, max_y - min_y, max_z, App.Vector(-1, min_y, min_z), App.Vector(0, 0, 1))
+    section = box.common(profile_keel.Shape)
+    section = section.translate(App.Vector(1, 0, 0) * -rib_width / 2)
+
+    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
+    part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_width)
+
+    index = 0
+    while True:
+      rib_pos_label = f"rib_positions_{index}"
+      rib_type_label = f"rib_type_{index}"
+      try:
+        rib_position = dimensions.get(rib_pos_label)
+        rib_type = dimensions.get(rib_type_label)
+      except ValueError:
+        break
+
+      index += 1
+
+      if rib_type == "skip":
+        continue
+
+      if rib_position < min_y or rib_position > max_y:
+        continue
+
+      intersect = Part.makeLine(App.Vector(0, rib_position, self.hull.BoundBox.ZMin), App.Vector(0, rib_position, self.hull.BoundBox.ZMax))
+      high_point = intersect.common(part_3d).BoundBox.ZMax
+
+      slot = Part.makeBox(rib_width * 2, rib_width.Value + 0.2, stem_depth,
+                          App.Vector(-rib_width, rib_position - rib_width.Value / 2 - 0.1
+                                     , high_point - stem_depth.Value / 2), App.Vector(0, 0, 1))
+      part_3d = part_3d.cut(slot)
+
+    return part_3d
+
+  def draw_keelson(self):
+    #profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     prow_height = dimensions.get("prow_height")
     keelson_length = dimensions.get("keelson_length")
@@ -948,13 +977,14 @@ class Components:
     keelson_depth = dimensions.get("keelson_depth")
     accurate_stringers = dimensions.get("accurate_stringers")
 
-    box = Part.makeBox(2, keelson_length, prow_height, App.Vector(-1, -keelson_length / 2, 0), App.Vector(0, 0, 1))
-    section = box.common(profile_keel.Shape)
-    section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
+    #box = Part.makeBox(2, keelson_length, prow_height, App.Vector(-1, -keelson_length / 2, 0), App.Vector(0, 0, 1))
+    #section = box.common(profile_keel.Shape)
+    #section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
 
-    offset = section.extrude(App.Vector(1, 0, 0) * keelson_width)
-    part_3d = offset.extrude(App.Vector(0, 0, 1) * keelson_depth)
+    #offset = section.extrude(App.Vector(1, 0, 0) * keelson_width)
+    #part_3d = offset.extrude(App.Vector(0, 0, 1) * keelson_depth)
 
+    part_3d = Part.makeBox(keelson_width, keelson_length, keelson_depth, App.Vector(-keelson_width / 2, -keelson_length / 2, 0), App.Vector(0, 0, 1))
     part_3d = part_3d.common(self.hull)
 
     group_component = create_group(doc, f"keelson")
@@ -1042,9 +1072,6 @@ class Components:
 
 class Mass:
   def __init__(self, doc, components: Components):
-    print(components.components_flat)
-    print(components.components_bulk)
-
     self.doc = doc
     self.components = components
 
@@ -1052,20 +1079,20 @@ class Mass:
     plywood_density = dimensions.get("plywood_density")
     pine_density = dimensions.get("pine_density")
 
-    flat_volume = self.get_volume(components.components_flat)
-    bulk_volume = self.get_volume(components.components_bulk)
+    flat_volume = self.get_volume(components.components_flat, "flat")
+    bulk_volume = self.get_volume(components.components_bulk, "bulk")
 
     flat_volume_m3 = round(flat_volume / 1e9, 5)
     bulk_volume_m3 = round(bulk_volume / 1e9, 5)
     print(
-        f"pine:    {flat_volume_m3:4.3f}m³ {flat_volume_m3 * pine_density:4.2f}kg")
+        f"pine:    {bulk_volume_m3:4.5f}m³ {bulk_volume_m3 * pine_density:4.2f}kg")
     print(
-        f"plywood: {bulk_volume_m3:4.3f}m³ {bulk_volume_m3 * plywood_density:4.2f}kg")
+        f"plywood: {flat_volume_m3:4.5f}m³ {flat_volume_m3 * plywood_density:4.2f}kg")
 
-  def get_volume(self, parts):
+  def get_volume(self, parts, type_):
     total_volume = 0
     for label, component in parts.items():
-      print(f"{label:<25}:{round(component.Volume / 1e9, 5)}m^3")
+      print(f"{label:<25}:{round(component.Volume / 1e9, 5)}m³\t{type_}")
       total_volume += component.Volume
     return total_volume
 
@@ -1105,6 +1132,14 @@ class Layout:
         x_pos = x_pos_offset
         y_pos = -component.BoundBox.YMax + y_pos_offset
         y_pos_mod += component.BoundBox.YLength + 50
+        z_pos = -component.BoundBox.XMin
+      elif "deck" in label:
+        direction = App.Vector(0, 0, 1)
+        print(component.BoundBox.YMin)
+        #x_pos = x_pos_offset + component.CenterOfGravity.y
+        x_pos = x_pos_offset + component.BoundBox.YMax
+        y_pos = y_pos_offset
+        y_pos_mod += component.BoundBox.XLength + 50
         z_pos = -component.BoundBox.XMin
 
       body = doc.addObject('PartDesign::Body', f"cutout_{label}")
