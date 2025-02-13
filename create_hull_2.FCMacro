@@ -78,6 +78,7 @@ class Hull:
             keel_height_intersection = sketch_profile_keel.Shape.section(intersection_plane).Vertexes[0].Z
             hull_curve_height_intersection = sketch_hull_curve_height.Shape.section(intersection_plane).Vertexes[0].Z
             hull_curve_height_intersection = max(deck_height_intersection, hull_curve_height_intersection)
+            hull_curve_height_intersection = hull_curve_height_intersection + keel_height_intersection
             hull_curve_horizontal_intersection = sketch_hull_curve_horizontal.Shape.section(intersection_plane).Vertexes[0].X
             hull_curve_horizontal_intersection = min(0, hull_curve_horizontal_intersection)
 
@@ -108,6 +109,7 @@ class Hull:
             section_pos += step_len
 
         self.loft()
+        self.transom()
 
     def draw_template(self, deck_width, deck_height, curve_width, curve_height, keel_height):
         """ Not used. Would create a base cross section template. """
@@ -150,7 +152,7 @@ class Hull:
         return deadrise_radius
 
     def draw_section(self, deck_width, deck_height, curve_width, curve_height, keel_height, deadrise_radius):
-        print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=} {deadrise_radius=}")
+        #print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=} {deadrise_radius=}")
         if abs(deck_width) < 1.0:
             print("Skipping section")
             return 0
@@ -281,6 +283,29 @@ class Hull:
             additive_loft.Profile = cross_section
           else:
             additive_loft.Sections += [cross_section]
+
+        App.ActiveDocument.recompute()
+        self.shape = additive_loft.Shape
+
+    def transom(self):
+      dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+      stern_height = dimensions.get("stern_height")
+      deck_width = dimensions.get("deck_width")
+      deck_length = dimensions.get("deck_length")
+      transom_angle = dimensions.get("transom_angle")
+      transom_overlap = dimensions.get("transom_overlap")
+
+      transom_mask = Part.makeBox(deck_width, transom_overlap * 3, stern_height * 3, 
+                                  App.Vector(-deck_width / 2, deck_length / 2, -stern_height),
+                                  App.Vector(0, 0, 1))
+      transom_mask = transom_mask.rotate(App.Vector(0, deck_length / 2, stern_height),
+                                         App.Vector(1, 0, 0),
+                                         -transom_angle)
+
+      to_cut = self.hull.newObject('PartDesign::Boolean','Boolean')
+      to_cut.Type = "Cut"
+      to_cut.addObjects([Part.show(transom_mask, "transom_mask")])
+      App.ActiveDocument.recompute()
 
 
 def mirror(point):

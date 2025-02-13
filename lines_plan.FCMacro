@@ -479,7 +479,6 @@ class Plans:
     sketches = [
         doc.getObjectsByLabel('dagger_board')[0],
         doc.getObjectsByLabel('rudder')[0],
-        doc.getObjectsByLabel('skeg')[0],
         ]
 
     for sketch in sketches:
@@ -619,10 +618,11 @@ class Components:
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
+    deck_length = dimensions.get("deck_length")
     rib_depth = dimensions.get("rib_depth").Value
 
-    mask = Part.makeBox(plan_deck.Shape.BoundBox.XLength / 2, plan_deck.Shape.BoundBox.YLength, self.hull.BoundBox.ZLength,
-                            App.Vector(0, plan_deck.Shape.BoundBox.YMin, self.hull.BoundBox.ZMin))
+    mask = Part.makeBox(plan_deck.Shape.BoundBox.XLength / 2, deck_length, self.hull.BoundBox.ZLength,
+                            App.Vector(0, -deck_length / 2, self.hull.BoundBox.ZMin))
 
     # Extrude deck_profile and deck_outline out to calculate meeting point at top
     # of gunwale.
@@ -976,7 +976,11 @@ class Components:
     section = box.common(profile_keel.Shape)
     section = section.translate(App.Vector(1, 0, 0) * -rib_thickness / 2)
 
-    offset = section.makeOffset2D(-stem_depth, openResult = True, fill = True)
+    longest = None
+    for wire in section.Wires:
+      if longest is None or wire.Length > longest.Length:
+        longest = wire
+    offset = longest.makeOffset2D(-stem_depth, openResult = True, fill = True)
     part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_thickness)
 
     index = 0
@@ -1093,8 +1097,7 @@ class Components:
 
     plane = Part.Plane(App.Vector(0, 0, thwart_height), App.Vector(0, 0, 1))
     deck_plan = self.hull.common(plane)
-    outline = clean_wire(deck_plan)
-    #Part.show(outline, "outline")
+    outline = clean_wire(deck_plan.Wires[0])
 
     offset = outline.makeOffset2D(-stringer_depth * 1.5, openResult = False)
     offset.fix(0.1, 0, 1)
@@ -1362,13 +1365,35 @@ def get_wire_curvature(wire):
 
 def clean_wire(wire):
   """ Turn wire with Curves as edges into straight lines as edges. """
+  edges = Part.sortEdges(wire.Edges)[0]
+
+  # Fill gaps
+  curves = []
+  fill_missing = False
+  for edge in edges:
+    if edge.Curve.TypeId == "Part::GeomLine":
+      fill_missing = True
+    else:
+      next_curve = edge.Curve
+      if fill_missing:
+        last_curve = curves[-1]
+        points = [last_curve.EndPoint, next_curve.StartPoint]
+        missing_curve = Part.BSplineCurve()
+        missing_curve.interpolate(points)
+        curves.append(missing_curve)
+        fill_missing = False
+
+      curves.append(next_curve)
+
   # Join all curves into one.
   combined_curve = None
-  for index, edge in enumerate(wire.Edges):
+  for curve in curves:
     if combined_curve is None:
-      combined_curve = edge.Curve.copy()
+      combined_curve = curve
     else:
-      combined_curve.join(edge.Curve.copy())
+      combined_curve.join(curve)
+
+  #Part.show(combined_curve.toShape(), "combined_curve")
 
   # Split curve into Vertexes and make lines from them.
   last_point = None
@@ -1395,6 +1420,7 @@ def clean_wire2(wire):
 
   wire = Part.Wire(edges)
   return wire
+
 
 doc = App.ActiveDocument
 body = get_body()
