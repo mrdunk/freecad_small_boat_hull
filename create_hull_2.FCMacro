@@ -64,12 +64,13 @@ class Hull:
         step_len = self.deck_length.Value / (section_count - 1)
         for index in range(section_count):
             working_section_pos = section_pos
-            if section_pos < -self.deck_length.Value / 2 + 10:
-                working_section_pos = -self.deck_length.Value / 2 + 10
-            elif section_pos > self.deck_length.Value / 2 - 10:
-                working_section_pos = self.deck_length.Value / 2 - 10
+            if section_pos < -self.deck_length.Value / 2:
+                working_section_pos = -self.deck_length.Value / 2
+            elif section_pos > self.deck_length.Value / 2:
+                working_section_pos = self.deck_length.Value / 2
 
-            print(section_count, section_pos, working_section_pos)
+            if working_section_pos <= -self.deck_length.Value / 2 + 5:
+              working_section_pos += 5
 
             # intersect outline drawings to find section dimensions.
             intersection_plane = Part.makePlane(highest * 2, deck_width * 2, App.Vector(-deck_width, working_section_pos, 0), App.Vector(0, 1, 0))
@@ -78,24 +79,19 @@ class Hull:
             keel_height_intersection = sketch_profile_keel.Shape.section(intersection_plane).Vertexes[0].Z
             hull_curve_height_intersection = sketch_hull_curve_height.Shape.section(intersection_plane).Vertexes[0].Z
             hull_curve_height_intersection = max(deck_height_intersection, hull_curve_height_intersection)
-            hull_curve_height_intersection = hull_curve_height_intersection + keel_height_intersection
+            hull_curve_height_intersection = hull_curve_height_intersection
             hull_curve_horizontal_intersection = sketch_hull_curve_horizontal.Shape.section(intersection_plane).Vertexes[0].X
-            hull_curve_horizontal_intersection = min(0, hull_curve_horizontal_intersection)
+            #hull_curve_horizontal_intersection = min(0, hull_curve_horizontal_intersection)
 
             section_label = f"rib_{round(working_section_pos, 0)}"
-            print(section_label, index)
+            print(section_label, section_pos, working_section_pos, index, deck_plan_intersection)
 
-            if(working_section_pos - self.deck_length.Value / 2 > -10):
-                working_section_pos = self.deck_length.Value / 2 - 10
-                
             section = self.draw_section(
                     -deck_plan_intersection,
                     deck_height_intersection,
                     -hull_curve_horizontal_intersection,
                     hull_curve_height_intersection,
                     keel_height_intersection,
-                    #abs(deadrise_radius * (deck_width.Value / 2) / (deck_plan_intersection + 1))
-                    #deadrise_radius * deck_height_intersection / deck_height
                     deadrise_radius
                     )
             if section:
@@ -152,10 +148,11 @@ class Hull:
         return deadrise_radius
 
     def draw_section(self, deck_width, deck_height, curve_width, curve_height, keel_height, deadrise_radius):
+        if abs(deck_width) < 1:
+            deck_width = 1.0
+            curve_width = deck_width / 4
+            keel_height = deck_height - 1
         #print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=} {deadrise_radius=}")
-        if abs(deck_width) < 1.0:
-            print("Skipping section")
-            return 0
         plane = self.doc.getObjectsByLabel("XY-plane")[0]
 
         sketch = self.doc.addObject("Sketcher::SketchObject", "cross_section")
@@ -208,18 +205,17 @@ class Hull:
         up = App.Vector(1, 0, 0)
         truncate_curve = False
 
-        #if join_point.y > curve_top.y or abs(join_point.x) > abs(curve_top.x) or join_point.y < origin.y:
         if join_point.y > curve_top.y or join_point.y < origin.y:
             # Top curve is entirely above the deck
             # or
             # op of top curve is narrower than widest point.
-            join_point = curve_top - App.Vector(0, 1, 0)
+            join_point = (curve_top + origin) / 2
             truncate_curve = True
 
         start_angle = -(join_point - deadrise_center).getAngle(up)
         end_angle = -(origin - deadrise_center).getAngle(up)
         
-        if start_angle == end_angle:
+        if start_angle == end_angle or truncate_curve:
             deadrise_geometery_l = Part.LineSegment(join_point, origin)
             deadrise_geometery_r = Part.LineSegment(origin, mirror(join_point))
         else:
@@ -252,6 +248,7 @@ class Hull:
             end_angle = -(join_point - upper_curve_center).getAngle(up)
             upper_curve_geometry_l = Part.ArcOfCircle(Part.Circle(upper_curve_center, axis, upper_curve_radius), start_angle, end_angle)
             upper_curve_geometry_r = Part.ArcOfCircle(Part.Circle(mirror(upper_curve_center), axis, upper_curve_radius), math.pi - end_angle, math.pi - start_angle)
+
         upper_curve_l = sketch.addGeometry(upper_curve_geometry_l)
         upper_curve_r = sketch.addGeometry(upper_curve_geometry_r)
         self.constrain_to_point(sketch, upper_curve_l, 1, start_point)
@@ -265,8 +262,6 @@ class Hull:
         deck = sketch.addGeometry(deck_geometry)
         self.constrain_to_point(sketch, deck, 1, start_point)
         self.constrain_to_point(sketch, deck, 2, end_point)
-
-        print(f"\t{origin=} {join_point=} {curve_top=}")
 
         return sketch
 
@@ -294,6 +289,9 @@ class Hull:
       deck_length = dimensions.get("deck_length")
       transom_angle = dimensions.get("transom_angle")
       transom_overlap = dimensions.get("transom_overlap")
+
+      if transom_overlap.Value <= 0:
+        return
 
       transom_mask = Part.makeBox(deck_width, transom_overlap * 3, stern_height * 3, 
                                   App.Vector(-deck_width / 2, deck_length / 2, -stern_height),

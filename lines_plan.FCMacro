@@ -69,7 +69,11 @@ class Slice_Base(list):
 
     wires = []
     for wire in Part.sortEdges(all_edges):
-      wires.append(Part.Wire(wire))
+      try:
+        wires.append(Part.Wire(wire))
+      except Part.OCCError:
+        # Not sure why the edges sometimes don't join up. They look fine when displayed.
+        pass
     return wires
 
   @classmethod
@@ -123,7 +127,6 @@ class Slice_CrossSection(Slice_Base):
           break
         self.section_positions.append(rib_position)
         index += 1
-
 
 class Slice_Waterline(Slice_Base):
   plane = App.Vector(0, 0, 1)
@@ -193,6 +196,7 @@ class Slice_Diagonals(Slice_Base):
             if longest is None or wire.Length > longest.Length:
               longest = wire
           wires = [longest]
+
         self += wires
 
   def iterate_longest_rib(self):
@@ -211,7 +215,7 @@ class Slice_Diagonals(Slice_Base):
     # Filter edges ending when crossing over to other side of hull.
     start_point = edge.firstVertex()
     end_point = edge.lastVertex()
-    if start_point.X < 0.0001 and end_point.X < 0.0001:
+    if start_point.X < -0.0001 or end_point.X < -0.0001:
       return None
 
     # Filter intersections with deck.
@@ -496,6 +500,7 @@ class Plans:
 
 class Components:
   stringers = []
+  stringers_deep = []
   ribs = {}
   components_flat = {}
   components_bulk = {}
@@ -508,7 +513,6 @@ class Components:
     self.diagonals = diagonals
     ribs_data = {}
     rib_diagonal_intersections = {}
-    self.rib_groups = {}
     self.stringers_group = None
 
     self.draw_stringers()
@@ -531,19 +535,42 @@ class Components:
         for shape in shapes.OutList:
           self.index_ribs(shape.Shape, ribs_data)
 
-    for rib_index, y_pos in enumerate(sorted(ribs_data.keys(), key = lambda val: int(val))):
-      self.draw_rib(doc, y_pos, rib_index, ribs_data[y_pos][0])
+    self.rib_group = create_group(doc, "ribs")
+    self.group.addObjects([self.rib_group])
+
+    for y_pos in sorted(ribs_data.keys(), key = lambda val: int(val)):
+      rib_index, wire = ribs_data[y_pos]
+      if rib_index < 0:
+        continue
+      self.draw_rib(doc, y_pos, rib_index, wire)
 
     self.mirror_sides()
 
     self.draw_deck()
+    self.draw_transom()
 
   def index_ribs(self, shape, ribs_data):
-    y_pos = str(round(shape.BoundBox.YMin))
-    if y_pos not in ribs_data:
-      ribs_data[y_pos] = []
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
 
-    ribs_data[y_pos].append(shape)
+    y_pos = str(round(shape.BoundBox.YMin))
+
+    # Work out index for rib at y_pos.
+    rib_index = 0
+    while True:
+      rib_pos_label = f"rib_positions_{rib_index}"
+      try:
+        rib_position = str(dimensions.get(rib_pos_label))
+      except ValueError:
+        rib_index = -1
+        break
+      if rib_position == y_pos:
+        break
+      rib_index += 1
+
+    if y_pos in ribs_data :
+      print(f"WARN: Duplicate ribs at {y_pos}.")
+
+    ribs_data[y_pos] = (rib_index, shape)
 
   def diagonal_normals(self):
     for diagonal in self.diagonals:
@@ -552,10 +579,13 @@ class Components:
 
   def draw_stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
+    hull_type = dimensions.get("hull_type")
     stringer_width = dimensions.get("stringer_width")
     stringer_depth = dimensions.get("stringer_depth")
     accurate_stringers = dimensions.get("accurate_stringers")
-    self.stringers_deep = []
+
+    if hull_type != "sof":
+      return
 
     hull = self.hull.copy()
 
@@ -602,6 +632,7 @@ class Components:
           # Fall back to raw (un-chamfered) shape.
           stringer = stringer_original
 
+      stringer = self.trim_transom(stringer)
       self.stringers.append(stringer)
       self.stringers_deep.append(stringer_deep)
       #Part.show(stringer, "stringer")
@@ -633,6 +664,7 @@ class Components:
     outwale_offset = gunwale_wire.copy().extrude(App.Vector(0, 0, 1) * -stringer_width)
     outwale_solid = outwale_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth)
     outwale_solid = outwale_solid.common(mask)
+    outwale_solid = self.trim_transom(outwale_solid)
     self.stringers.append(outwale_solid)
 
     outwale_deep_wire = gunwale_wire.copy().translate(App.Vector(0, 0, 1) * stringer_width.Value)
@@ -645,7 +677,8 @@ class Components:
     inwale_wire = gunwale_wire.copy().translate(App.Vector(1, 0, 0) * -(rib_depth + stringer_depth.Value / 2))
     inwale_offset = inwale_wire.extrude(App.Vector(0, 0, 1) * -stringer_width)
     inwale_solid = inwale_offset.extrude(App.Vector(1, 0, 0) * stringer_depth)
-    inwale_solid = inwale_solid.common(mask)
+    inwale_solid = inwale_solid.common(self.hull)
+    inwale_solid = self.trim_transom(inwale_solid)
     self.stringers.append(inwale_solid)
 
     inwale_deep_wire = gunwale_wire.copy().translate(App.Vector(1, 0, 0) * -(rib_depth + stringer_depth.Value * 1.5))
@@ -658,7 +691,92 @@ class Components:
     #Part.show(outwale_solid, "outwale_solid")
     #Part.show(outwale_deep_solid, "outwale_deep_solid")
 
+    if self.stringers_group is None:
+      self.stringers_group = create_group(doc, f"stringers")
+      self.group.addObjects([self.stringers_group])
+
   def draw_rib(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    hull_type = dimensions.get("hull_type")
+
+    if hull_type == "plank":
+      self.draw_rib_plank(doc, rib_position, rib_index, rib_wire)
+    else:
+      self.draw_rib_sof(doc, rib_position, rib_index, rib_wire)
+
+  def draw_rib_plank(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
+    profile_deck = doc.getObjectsByLabel('profile_deck')[0]
+    plan_deck = doc.getObjectsByLabel('plan_deck')[0]
+
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    rib_thickness = dimensions.get("rib_thickness").Value
+    rib_depth = dimensions.get("rib_depth").Value
+    rib_thwart_depth = dimensions.get("rib_thwart_depth").Value
+    brace_width = dimensions.get("brace_width").Value
+    brace_width_narrow = dimensions.get("brace_width_narrow").Value
+    rib_chamfer_radius = dimensions.get("rib_chamfer_radius")
+    rib_chamfer_radius_narrow = dimensions.get("rib_chamfer_radius_narrow")
+    rib_outside_relief = dimensions.get("rib_outside_relief")
+    thwart_height = dimensions.get("thwart_height").Value
+    low_thwart_height = dimensions.get("low_thwart_height").Value
+    deck_width = dimensions.get("deck_width")
+    deck_height = dimensions.get("deck_height")
+
+    # Extrude deck_profile and deck_outline out to calculate meeting point at top
+    # of gunwale.
+    profile_extruded = profile_deck.Shape.extrude(App.Vector(1, 0, 0) * 1000)
+    plan_extruded = plan_deck.Shape.extrude(App.Vector(0, 0, 1) * 1000)
+    gunwale_wire = profile_extruded.section(plan_extruded)
+
+    rib_plane = Part.Plane(App.Vector(0, int(rib_position), 0), App.Vector(0, 1, 0))
+
+    # Get shapes of intersections between diagonals and rib.
+    rib_vertexes = [
+        App.Vector(0, int(rib_position), rib_wire.BoundBox.ZMin),
+        App.Vector(rib_wire.BoundBox.XMax, int(rib_position), rib_wire.BoundBox.ZMax),
+        ]
+    print(gunwale_wire)
+    print(rib_wire)
+    #Part.show(rib_wire, "rib_wire")
+    print(self.diagonals + gunwale_wire.Wires, len(gunwale_wire.Wires))
+
+    for diagonal in self.diagonals:
+      intersection = diagonal.Wires[0].section(rib_plane)
+      if intersection.Vertexes:
+        rib_vertexes.append(intersection.Vertexes[0].Point)
+
+    rib_edges = []
+    last_verex = None
+    for rib_vertex in sorted(rib_vertexes, key = lambda vector: vector.z):
+      if last_verex:
+          rib_edges.append(Part.LineSegment(last_verex, rib_vertex))
+      last_verex = rib_vertex
+
+
+    """
+    for d in sorted(self.diagonals + gunwale_wire.Wires, key = lambda wire: wire.BoundBox.ZMin):
+    #for d, normal in self.diagonal_normals() + [gunwale_wire]:
+
+      if get_wire_curvature(d.Wires[0]) < 0:
+        d.reverse()
+
+      # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
+      # issues later due to faces being in the same place on identical planes.
+      diagonal_wire = clean_wire2(d.copy().Wires[0])
+      #Part.show(diagonal_wire, "diagonal_wire")
+
+      intersection = diagonal_wire.section(rib_plane)
+      if intersection.Vertexes:
+        if last_verex:
+          rib_edges.append(Part.LineSegment(last_verex, intersection.Vertexes[0].Point))
+        last_verex = intersection.Vertexes[0].Point
+
+    """
+    rib_shape = Part.Shape(rib_edges)
+    Part.show(rib_shape, "rib_shape")
+
+
+  def draw_rib_sof(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     rib_thickness = dimensions.get("rib_thickness").Value
     rib_depth = dimensions.get("rib_depth").Value
@@ -832,11 +950,6 @@ class Components:
 
     self.ribs[rib_position] = rib_solid
 
-    # set up the group to store the displayed ribs in later.
-    group_component = create_group(doc, f"rib_{rib_position}")
-    self.group.addObjects([group_component])
-    self.rib_groups[rib_position] = group_component
-
   def chamfer_rib_hole(self, rib_face, rib_chamfer_radius, deck_width):
     inner_wire = sorted(rib_face.Wires, key=lambda value: value.Length)[0]
     if inner_wire.BoundBox.XLength < 2 * rib_chamfer_radius or inner_wire.BoundBox.ZLength < 2 * rib_chamfer_radius:
@@ -941,6 +1054,7 @@ class Components:
     max_y = dagger_board.Shape.BoundBox.YMin
 
     part_3d = self.draw_stem_stern(min_y, max_y)
+    part_3d = self.trim_transom(part_3d)
 
     group_component = create_group(doc, f"stem")
     self.group.addObjects([group_component])
@@ -957,6 +1071,7 @@ class Components:
     max_y = deck_length.Value / 2 + 10
 
     part_3d = self.draw_stem_stern(min_y, max_y)
+    part_3d = self.trim_transom(part_3d)
 
     group_component = create_group(doc, f"stern")
     self.group.addObjects([group_component])
@@ -1044,7 +1159,7 @@ class Components:
 
       self.ribs[rib_position] = rib
       name = f"rib_{rib_position}"
-      self.rib_groups[rib_position].addObjects([Part.show(rib, name)])
+      self.rib_group.addObjects([Part.show(rib, name)])
       self.components_flat[name] = rib
 
     for stringer in self.stringers:
@@ -1079,10 +1194,20 @@ class Components:
     rib_thickness = dimensions.get("rib_thickness")
 
     deck_section_indexes = [
-        (0, 2),
-        (3, 4),
-        (6, 8)
+        #(0, 2),
+        #(3, 4),
+        #(6, 8)
         ]
+    index = 0
+    while True:
+      deck_label = f"deck_{index}"
+      try:
+        deck_section = dimensions.get(deck_label)
+      except ValueError:
+        break
+      deck_section_index = (int(rib) for rib in deck_section.split(","))
+      deck_section_indexes.append(deck_section_index)
+      index += 1
 
     rib_positions = []
     index = 0
@@ -1125,8 +1250,73 @@ class Components:
       #for value in self.stringers_deep:
       #  deck_part = deck_part.cut(value)
 
+      deck_part = deck_part.common(self.hull)
+      deck_part = self.trim_transom(deck_part)
+
       group_component.addObjects([ Part.show(deck_part, part_name) ])
       self.components_flat[part_name] = deck_part
+
+  def trim_transom(self, to_trim):
+    """ Mask out components overhanging transom """
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    rib_thickness = dimensions.get("rib_thickness")
+    stern_height = dimensions.get("stern_height")
+    deck_width = dimensions.get("deck_width")
+    deck_length = dimensions.get("deck_length")
+    transom_angle = dimensions.get("transom_angle")
+    transom_overlap = dimensions.get("transom_overlap")
+
+    if transom_overlap <= 0:
+      return to_trim
+
+    transom_mask = Part.makeBox(deck_width, transom_overlap * 3, stern_height * 3,
+                                App.Vector(-deck_width / 2, deck_length / 2 - rib_thickness, -stern_height),
+                                App.Vector(0, 0, 1))
+    transom_mask = transom_mask.rotate(App.Vector(0, deck_length / 2, stern_height),
+                                       App.Vector(1, 0, 0),
+                                       -transom_angle)
+
+    return to_trim.cut(transom_mask)
+
+
+  def draw_transom(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    rib_thickness = dimensions.get("rib_thickness")
+    stern_height = dimensions.get("stern_height")
+    deck_length = dimensions.get("deck_length")
+    transom_angle = dimensions.get("transom_angle")
+    transom_overlap = dimensions.get("transom_overlap")
+
+    if transom_overlap <= 0:
+      return
+
+    plane = Part.Plane(
+        App.Vector(0, 0, 0),
+        App.Vector(0, 1, 0))
+    plane.rotate(
+        App.Placement(
+          App.Vector(0, 0, stern_height),
+          App.Vector(1, 0, 0),
+          -transom_angle
+          )
+        )
+    plane.translate(App.Vector(0, 1, 0) * ((deck_length / 2) - rib_thickness))
+
+    transom_face = self.hull.common(plane)
+    transom_face.rotate(
+        App.Vector(0, 0, 0),
+        App.Vector(1, 0, 0),
+        transom_angle
+        )
+    transom = transom_face.extrude(App.Vector(0, 1, 0) * rib_thickness.Value)
+    transom.rotate(
+        App.Vector(0, 0, 0),
+        App.Vector(1, 0, 0),
+        -transom_angle
+        )
+
+    self.rib_group.addObjects([ Part.show(transom, "transom") ])
+    self.components_flat["transom"] = transom
 
 
 class Mass:
@@ -1175,6 +1365,8 @@ class Layout:
     self.export_dxf()
 
   def project_parts(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    transom_angle = dimensions.get("transom_angle")
     x_pos_offset = 1000
     y_pos_offset = -2000
     y_pos_mod = 0
@@ -1195,11 +1387,22 @@ class Layout:
         z_pos = -component.BoundBox.XMin
       elif "deck" in label:
         direction = App.Vector(0, 0, 1)
-        print(component.BoundBox.YMin)
         x_pos = x_pos_offset + component.BoundBox.YMax
         y_pos = y_pos_offset
         y_pos_mod += component.BoundBox.XLength + 50
         z_pos = -component.BoundBox.XMin
+      elif "transom" == label:
+        direction = App.Vector(1, 0, 0)
+        component = component.copy()
+        component.rotate(
+            App.Vector(0, 0, 0),
+            App.Vector(1, 0, 0),
+            transom_angle
+            )
+        x_pos = component.BoundBox.XLength / 2 + x_pos_offset
+        y_pos = y_pos_offset
+        y_pos_mod += component.BoundBox.ZLength + 50
+        z_pos = -component.BoundBox.YMin
 
       body = doc.addObject('PartDesign::Body', f"cutout_{label}")
       self.cutouts.addObject(body)
@@ -1215,6 +1418,30 @@ class Layout:
       body.Placement = App.Placement(App.Vector(x_pos, y_pos, z_pos), direction, 90)
 
       self.bodies[label] = body
+
+  """
+  def project(self, solid, direction):
+    x = 3000
+    y = 4000
+    z = 1000
+    plane = Part.makePlane(x, y, FreeCAD.Vector(-x / 2, -y / 2, 0), direction)
+    #Part.show(plane, "plane")
+    projected_edges = []
+    for wire in solid.Edges:
+      projected = plane.makeParallelProjection(wire, direction)
+      projected_edges += projected.Edges
+
+    sorted_edges = Part.sortEdges(projected_edges)
+    face = Part.Face()
+    for edges in sorted_edges:
+      one_wire = Part.Wire(edges)
+      #Part.show(one_wire, "one_wire")
+      if one_wire.isClosed():
+        one_face = Part.Face(one_wire)
+        Part.show(one_face, "one_face")
+        face = face.fuse(one_face)
+    Part.show(face, "face")
+  """
 
   def draw_plans(self):
     for label, body in self.bodies.items():
@@ -1442,13 +1669,13 @@ if body:
   data_xz = Slice_Diagonals(doc, body, data_z)
   View_Wireframe_Diagonals(body.Name, doc, body, data_xz)
 
-  lowest_point = min(data_x.lowest_point, data_y.lowest_point, data_z.lowest_point)
-
-  Plans(doc, body.Name, lowest_point)
-
+#  lowest_point = min(data_x.lowest_point, data_y.lowest_point, data_z.lowest_point)
+#
+#  Plans(doc, body.Name, lowest_point)
+#
   components = Components(doc, body.Name, body.Shape, data_xz)
-  Layout(doc, components)
-  Mass(doc, components)
+#  Layout(doc, components)
+#  Mass(doc, components)
 
 else:
   print("No hull selected.")
