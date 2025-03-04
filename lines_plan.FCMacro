@@ -13,6 +13,7 @@ import Part
 import DraftGeomUtils
 import draftgeoutils
 import importDXF
+import MeshPart
 from FreeCAD import Units
 
 class Slice_Base(list):
@@ -530,6 +531,9 @@ class Components:
     ribs_data = {}
     rib_diagonal_intersections = {}
     self.stringers_group = None
+    self.planks_group = None
+    self.plans_planks_group = None
+    self.solid_planks_group = None
 
     self.draw_planking()
     self.draw_stringers()
@@ -592,67 +596,214 @@ class Components:
   def diagonal_normals(self):
     for diagonal in self.diagonals:
       shape = Part.Shape([diagonal])
-      yield (shape, self.diagonal_normal_at(shape, shape.Vertexes[0]))
+      yield (shape, self.diagonal_normal_at(shape))
 
   def draw_planking(self):
+    self.scratch = create_group(self.doc, "scratch_planks")
+    self.scratch.Visibility = False
+
+    self.planks = []
+
+    if self.planks_group is None:
+      self.planks_group = create_group(doc, f"planks")
+      self.group.addObjects([self.planks_group])
+      self.planks_group.Visibility = False
+
+      self.plans_planks_group = create_group(doc, f"plans_planks")
+      self.group.addObjects([self.plans_planks_group])
+      self.plans_planks_group.Visibility = False
+
+      self.solid_planks_group = create_group(doc, f"solid_planks")
+      self.group.addObjects([self.solid_planks_group])
+      self.solid_planks_group.Visibility = True
+
     dimensions = doc.getObjectsByLabel("dimensions")[0]
+    prow_height = dimensions.get("prow_height")
     hull_type = dimensions.get("hull_type")
-    stringer_width = dimensions.get("stringer_width")
-    stringer_depth = dimensions.get("stringer_depth")
-    accurate_stringers = dimensions.get("accurate_stringers")
 
-    mask = Part.makeBox(self.hull.BoundBox.XLength / 2, self.hull.BoundBox.YLength, self.hull.BoundBox.ZLength,
-                        App.Vector(0, -self.hull.BoundBox.YLength / 2, 0))
+    gunwale_wire = self.gunwale_wire()
+    gunwale_wire.reverse()
+    diagonals_data = list(zip(self.diagonals.iterate_positions(), self.diagonal_normals())) + [((90, prow_height), (gunwale_wire, App.Vector(0, 0, 0)))]
+    diagonals_data = sorted(diagonals_data, key = lambda data: data[1][0].BoundBox.ZMin)  # Sort by wire height.
 
-    planks = []
-    last_diagonal_height = None
-    last_diagonal_angle = None
-    last_diagonal_shape = None
-    for (angle, height), (diagonal_shape, diagonal_normal) in zip(self.diagonals.iterate_positions(), self.diagonal_normals()):
-      if last_diagonal_height is not None:
-        plank_height = (last_diagonal_height + height) / 2
-        plank_angle = (last_diagonal_angle + angle) / 2
-        print("  ", plank_height, plank_angle)
-        print(diagonal_shape, last_diagonal_shape)
-        #plank_plane = App.Vector(math.cos(math.radians(plank_angle)), 0, math.sin(math.radians(plank_angle)))
-        #plank_normal = self.hull.slice(plank_plane, math.sin(math.radians(plank_angle)) * plank_height)[0]
-        #plank_normal = sorted(plank_normal.common(mask).Wires, key = lambda wire: wire.Length)[-1]
+    last_diagonal_wire = None
+    first_plank = True  # Starts from keel (bottom).
+    last_plank = False  # At top (gunwale).
+    plank_count = 0
+    for (angle, height), (diagonal_shape, diagonal_normal) in diagonals_data:
+      height_mask = Part.makeBox(self.hull.BoundBox.XLength, self.hull.BoundBox.YLength, height * 2,
+                          App.Vector(0, -self.hull.BoundBox.YLength / 2, -height))
+      diagonal_shape = diagonal_shape.common(height_mask)
 
-        #plane = Part.makePlane(self.hull.BoundBox.YLength, self.hull.BoundBox.YLength)
-        #plane.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), -plank_angle.Value)
-        #plane.translate(App.Vector(0, -self.hull.BoundBox.YLength / 2, 0))
-        #Part.show(plane, "plane")
-        #projected = plane.makeParallelProjection(diagonal_shape.Wires[0], plane.normalAt(10, 10))
-        #Part.show(projected, "projected")
-        #projected = plane.makeParallelProjection(last_diagonal_shape.Wires[0], plane.normalAt(10, 10))
-        #Part.show(projected, "projected")
+      diagonal_wire = Part.Wire(Part.sortEdges(diagonal_shape.Edges)[0])
+      diagonal_wire = diagonal_shape.Wires[0]
 
-        #plank_edges = [last_diagonal_shape.Wires[0]]
-        #if plank_edges[0].distToShape(diagonal_shape.Wires[0].Vertexes[0]) < plank_edges[0].distToShape(diagonal_shape.Wires[0].Vertexes[-1]):
-        #  print("##")
-        #else:
-        #   diagonal_shape.Wires[0].reverse()
-        #plank_edges.append(Part.makeLine(last_diagonal_shape.Wires[0].Vertexes[0].Point, diagonal_shape.Wires[0].Vertexes[0].Point))
-        #plank_edges.append(diagonal_shape.Wires[0])
-        #plank_edges.append(Part.makeLine(diagonal_shape.Wires[0].Vertexes[-1].Point, last_diagonal_shape.Wires[0].Vertexes[-1].Point))
+      if last_diagonal_wire is not None:
+        #diagonal_wire = last_diagonal_wire.makeHomogenousWires(diagonal_wire)
 
-        #plank_wire = Part.Wire(plank_edges)
-        #Part.show(plank_wire, "plank_wire")
+        print(f"Calculating plank: {plank_count=}, {angle=}, {height=}, {first_plank=}, {last_plank=}")
 
-        #plank_face = Part.Face(plank_wire)
-        #Part.show(plank_face, "plank_face")
+        top, bottom = self.apply_plank_overlaps(diagonal_wire, last_diagonal_wire, top_overlap=not last_plank, bottom_overlap=not first_plank)
 
-        #Part.show(plank_normal, "plank_normal")
+        self.flat_plank(top, bottom)
+        self.solid_plank(top, bottom)
 
-        last_diagonal_wire = last_diagonal_shape.Wires[0]
-        diagonal_wire = last_diagonal_wire.makeHomogenousWires(diagonal_shape.Wires[0])
-        Part.show(last_diagonal_wire, "last_diagonal_shape")
-        Part.show(diagonal_wire, "diagonal_shape")
-      print("**", height, angle)
-      last_diagonal_height = height
-      last_diagonal_angle = angle
-      last_diagonal_shape = diagonal_shape
+        first_plank = False
+        last_plank = (plank_count == len(diagonals_data) - 3)
+        plank_count += 1
 
+      last_diagonal_wire = diagonal_wire
+
+  def flat_plank(self, top, bottom):
+    flat_part = FreeCAD.ActiveDocument.addObject('Part::RuledSurface', 'plank_surface')
+    top = Part.show(top, "top_wire")
+    bottom = Part.show(bottom, "bottom_wire")
+    flat_part.Curve1 = (top, [""])
+    flat_part.Curve2 = (bottom, [""])
+    App.ActiveDocument.recompute()
+
+    shape = Part.getShape(flat_part, "")
+    flat_mesh = FreeCAD.ActiveDocument.addObject("Mesh::Feature", "plank_mesh")
+    flat_mesh.Mesh = MeshPart.meshFromShape(Shape = shape, LinearDeflection=0.1, AngularDeflection=0.523599, Relative=False)
+    flat_mesh.removeNonManifolds()
+
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(self.doc.Name, flat_mesh.Name)
+    Gui.runCommand('MeshPart_CreateFlatMesh', 0)
+
+    flat_plank = FreeCAD.ActiveDocument.Objects[-1]
+
+    self.plans_planks_group.addObject(flat_plank)
+    self.planks_group.addObject(flat_mesh)
+    self.scratch.addObject(top)
+    self.scratch.addObject(bottom)
+    self.scratch.addObject(flat_part)
+
+    top.Visibility = False
+    bottom.Visibility = False
+    flat_part.Visibility = False
+    flat_plank.Visibility = False
+    flat_mesh.Visibility = False
+
+  def iterate_plank_edges(self, top, bottom):
+    if isinstance(top, Part.Wire):
+      top = [vertex.Point for vertex in top.Vertexes]
+    if isinstance(bottom, Part.Wire):
+      bottom = [vertex.Point for vertex in bottom.Vertexes]
+
+    top_v_0 = None
+    top_v_1 = None
+    bottom_v_0 = None
+    bottom_v_1 = None
+    for top_v_2, bottom_v_2 in zip(top + [None], bottom + [None]):
+      #if top_v_2:
+      #  top_v_2 = top_v_2.Point
+      #  bottom_v_2 = bottom_v_2.Point
+
+      top_first = top_v_1
+      top_last = top_v_1
+      bottom_first = bottom_v_1
+      bottom_last = bottom_v_1
+      if top_v_0:
+        top_first = top_v_0
+        bottom_first = bottom_v_0
+      if top_v_2:
+        top_last = top_v_2
+        bottom_last = bottom_v_2
+
+      if top_v_1:
+        top_normal = (top_last - top_first)
+        top_normal.normalize()
+        bottom_normal = (bottom_last - bottom_first)
+        bottom_normal.normalize()
+        top_to_bottom = (top_v_1 - bottom_v_1)
+        top_to_bottom.normalize()
+
+        top_perpendicular = top_normal.cross(top_to_bottom)
+        top_perpendicular.normalize()
+        bottom_perpendicular = bottom_normal.cross(top_to_bottom)
+        bottom_perpendicular.normalize()
+
+        yield top_v_1, bottom_v_1, top_perpendicular, bottom_perpendicular
+
+      top_v_0 = top_v_1
+      bottom_v_0 = bottom_v_1
+      top_v_1 = top_v_2
+      bottom_v_1 = bottom_v_2
+
+  def solid_plank(self, top, bottom):
+    plank_thickness = 6
+    cross_sections = []
+
+    for top_v, bottom_v, top_perpendicular, bottom_perpendicular in self.iterate_plank_edges(top, bottom):
+        outline = [
+            Part.makeLine(top_v, bottom_v),
+            Part.makeLine(bottom_v, bottom_v - bottom_perpendicular * plank_thickness),
+            Part.makeLine(bottom_v - bottom_perpendicular * plank_thickness, top_v - top_perpendicular * plank_thickness),
+            Part.makeLine(top_v - top_perpendicular * plank_thickness, top_v)
+            ]
+        plank_section_wire = Part.Wire(outline)
+        plank_section_object = Part.show(plank_section_wire, "plank_section_wire")
+        cross_sections.append(plank_section_object)
+
+        plank_section_object.Visibility = False
+        self.scratch.addObject(plank_section_object)
+    self.loft(cross_sections)
+
+  def loft(self, cross_sections):
+    additive_loft = FreeCAD.ActiveDocument.addObject("Part::Loft", "solid_plank")
+    additive_loft.Sections = cross_sections
+    additive_loft.Solid = True
+    additive_loft.Ruled = True
+
+    self.solid_planks_group.addObjects([additive_loft])
+
+    App.ActiveDocument.recompute()
+    #print(additive_loft.Shape.Volume / 1e9)
+
+    self.planks.append(additive_loft.Shape)
+
+  def apply_plank_overlaps(self, top_wire, bottom_wire, top_overlap=True, bottom_overlap=True):
+    overlap_len = 20
+    lap_depth = 3
+    point_count = int(top_wire.Length / 50)
+
+    top_wire = Part.Wire(top_wire.copy().Edges)
+    bottom_wire = Part.Wire(bottom_wire.copy().Edges)
+    top_wire = top_wire.discretize(Number = point_count)
+    bottom_wire = bottom_wire.discretize(Number = point_count)
+
+    top_edges = []
+    bottom_edges = []
+    overlap_bottom_edges = []
+    last_top = None
+    last_bottom = None
+    last_overlap_bottom = None
+    for top_v, bottom_v, top_perpendicular, bottom_perpendicular in self.iterate_plank_edges(top_wire, bottom_wire):
+      overlap_bottom_v = bottom_v
+      if top_overlap:
+        top_v = top_v + top_perpendicular * lap_depth
+      if bottom_overlap:
+        bottom_v = bottom_v - bottom_perpendicular * lap_depth
+        plank_vector = bottom_v - top_v
+        plank_vector.normalize()
+        overlap_bottom_v = bottom_v + (plank_vector * overlap_len)
+
+      if last_top is not None:
+        top_edges.append(Part.makeLine(last_top, top_v))
+        bottom_edges.append(Part.makeLine(last_bottom, bottom_v))
+        overlap_bottom_edges.append(Part.makeLine(last_overlap_bottom, overlap_bottom_v))
+      last_top = top_v
+      last_bottom = bottom_v
+      last_overlap_bottom = overlap_bottom_v
+
+    new_top_wire = Part.Wire(top_edges)
+    new_bottom_wire = Part.Wire(bottom_edges)
+    overlap_bottom_wire = Part.Wire(overlap_bottom_edges)
+    #Part.show(new_top_wire, "new_top_wire")
+    #Part.show(new_bottom_wire, "new_bottom_wire")
+    #Part.show(overlap_bottom_wire, "overlap_bottom_wire")
+    return new_top_wire, overlap_bottom_wire
 
   def draw_stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -669,6 +820,7 @@ class Components:
     fatten = 1
     for d, normal in self.diagonal_normals():
       print(f"Drawing stringer. {normal}")
+      normal.normalize()
 
       if get_wire_curvature(d.Wires[0]) < 0:
         d.reverse()
@@ -676,20 +828,20 @@ class Components:
       # Make stringer slightly bigger than it actually is so we don't hit boolean comparison
       # issues later due to faces being in the same place on identical planes.
       pattern = clean_wire2(d.copy().Wires[0])
-      pattern.translate(normal.normalize() * ((stringer_width.Value + fatten) / 2))
+      pattern.translate(normal * ((stringer_width.Value + fatten) / 2))
       pattern = pattern.makeOffset2D(fatten / 2, openResult = True, fill = False)
       pattern = pattern.makeOffset2D((stringer_depth + Units.Quantity(f"{fatten}mm")), openResult = True, fill = True)
-      stringer = pattern.extrude(normal.normalize() * (-stringer_width.Value - fatten))
+      stringer = pattern.extrude(normal * (-stringer_width.Value - fatten))
 
       # This deeper version of the stringer cuts the full notch out of the rib.
       # Since the plane of each stringer's curve is at a different angle to the main
       # hull it would be hard to calculate the correct shape for each notch.
       # Instead, this stringer extends all the way out of the notch so we can do a boolean cut.
       pattern_deep = clean_wire2(d.copy().Wires[0])
-      pattern_deep.translate(normal.normalize() * stringer_width / 2)
+      pattern_deep.translate(normal * stringer_width / 2)
       pattern_deep = pattern_deep.makeOffset2D(-stringer_depth * 2, openResult = True, fill = False)
       pattern_deep = pattern_deep.makeOffset2D(stringer_depth * 3, openResult = True, fill = True)
-      stringer_deep = pattern_deep.extrude(-normal.normalize() * stringer_width)
+      stringer_deep = pattern_deep.extrude(-normal * stringer_width)
 
       if int(accurate_stringers):
         stringer_original = stringer.copy()
@@ -720,8 +872,20 @@ class Components:
     self.stringers_group = create_group(doc, f"stringers")
     self.group.addObjects([self.stringers_group])
 
-  def draw_gunwale(self):
+  def gunwale_wire(self):
     profile_deck = doc.getObjectsByLabel('profile_deck')[0]
+    plan_deck = doc.getObjectsByLabel('plan_deck')[0]
+
+    # Extrude deck_profile and deck_outline out to calculate meeting point at top
+    # of gunwale.
+    profile_extruded = profile_deck.Shape.extrude(App.Vector(1, 0, 0) * 1000)
+    plan_extruded = plan_deck.Shape.extrude(App.Vector(0, 0, 1) * 1000)
+    gunwale = profile_extruded.section(plan_extruded)
+    #Part.show(gunwale, "gunwale")
+    return Part.Wire(gunwale.Edges)
+
+  def draw_gunwale(self):
+    #profile_deck = doc.getObjectsByLabel('profile_deck')[0]
     plan_deck = doc.getObjectsByLabel('plan_deck')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stringer_width = dimensions.get("stringer_width")
@@ -729,14 +893,12 @@ class Components:
     deck_length = dimensions.get("deck_length")
     rib_depth = dimensions.get("rib_depth").Value
 
+    print("Calculating gunnel")
+
     mask = Part.makeBox(plan_deck.Shape.BoundBox.XLength / 2, deck_length, self.hull.BoundBox.ZLength,
                             App.Vector(0, -deck_length / 2, self.hull.BoundBox.ZMin))
 
-    # Extrude deck_profile and deck_outline out to calculate meeting point at top
-    # of gunwale.
-    profile_extruded = profile_deck.Shape.extrude(App.Vector(1, 0, 0) * 1000)
-    plan_extruded = plan_deck.Shape.extrude(App.Vector(0, 0, 1) * 1000)
-    gunwale_wire = profile_extruded.section(plan_extruded)
+    gunwale_wire = self.gunwale_wire()
 
     outwale_offset = gunwale_wire.copy().extrude(App.Vector(0, 0, 1) * -stringer_width)
     outwale_solid = outwale_offset.extrude(App.Vector(1, 0, 0) * -stringer_depth)
@@ -775,13 +937,19 @@ class Components:
   def draw_rib(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     hull_type = dimensions.get("hull_type")
+    rib_type = dimensions.get(f"rib_type_{rib_index}")
+
+    if rib_type == "skip":
+      return
+
+    print(f"New rib: {rib_position=}, {rib_index=}, {rib_type=}")
 
     if hull_type == "plank":
-      self.draw_rib_plank(doc, rib_position, rib_index, rib_wire)
+      self.draw_rib_planked(doc, rib_position, rib_index, rib_wire)
     else:
       self.draw_rib_sof(doc, rib_position, rib_index, rib_wire)
 
-  def draw_rib_plank(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
+  def draw_rib_planked(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
     profile_deck = doc.getObjectsByLabel('profile_deck')[0]
     plan_deck = doc.getObjectsByLabel('plan_deck')[0]
 
@@ -800,32 +968,35 @@ class Components:
     deck_height = dimensions.get("deck_height")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
 
-    if rib_type == "skip":
-      return
-
-    # Extrude deck_profile and deck_outline out to calculate meeting point at top
-    # of gunwale.
-    profile_extruded = profile_deck.Shape.extrude(App.Vector(1, 0, 0) * 1000)
-    plan_extruded = plan_deck.Shape.extrude(App.Vector(0, 0, 1) * 1000)
-    gunwale_wire = profile_extruded.section(plan_extruded)
-
     rib_plane = Part.Plane(App.Vector(0, int(rib_position), 0), App.Vector(0, 1, 0))
 
-    # Get shapes of intersections between diagonals and rib.
     rib_vertexes = [
         App.Vector(0, int(rib_position), rib_wire.BoundBox.ZMin),
-        App.Vector(rib_wire.BoundBox.XMax, int(rib_position), rib_wire.BoundBox.ZMax),
         ]
 
-    for diagonal in self.diagonals:
+    # Get shapes of intersections between diagonals and rib.
+    last_point = None
+    for diagonal in sorted(self.diagonals, key = lambda diagonal: diagonal.BoundBox.ZMin):
       intersection = diagonal.Wires[0].section(rib_plane)
       if intersection.Vertexes:
-        rib_vertexes.append(intersection.Vertexes[0].Point)
+        point = intersection.Vertexes[0].Point
+        if last_point is None:
+          rib_vertexes.append(point)
+        else:
+          plank_normal = (point - last_point)
+          plank_normal.normalize()
+          plank_perpendicular = App.Vector(plank_normal.z, plank_normal.y, -plank_normal.x)
+          plank_perpendicular.normalize()
+          rib_vertexes.append(point - plank_perpendicular * 3)
+          rib_vertexes.append(point + plank_perpendicular * 3)
+        last_point = point
+    # Add gunwale vertex.
+    rib_vertexes.append(App.Vector(rib_wire.BoundBox.XMax, int(rib_position), rib_wire.BoundBox.ZMax))
 
     rib_edges = []
     last_verex = None
     first_vertex = None
-    for rib_vertex in sorted(rib_vertexes, key = lambda vector: vector.z):
+    for rib_vertex in rib_vertexes:
       if last_verex:
           rib_edges.append(Part.LineSegment(last_verex, rib_vertex))
       last_verex = rib_vertex
@@ -836,8 +1007,10 @@ class Components:
     rib_edges.append(Part.LineSegment(App.Vector(0, last_verex.y, last_verex.z), first_vertex))
 
     rib_wire = Part.Wire(Part.Shape(rib_edges).Edges)
+    rib_wire = rib_wire.cleaned()
+    #Part.show(rib_wire, "rib_wire")
 
-    rib_face = Part.Face(rib_wire)
+    rib_face = Part.makeFace([rib_wire])
     rib_face.translate(-App.Vector(0, 1, 0) * rib_thickness / 2)
     rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_thickness)
     self.ribs[rib_position] = rib_solid
@@ -861,8 +1034,6 @@ class Components:
     if rib_type == "thwart_narrow":
       brace_width = brace_width_narrow
       rib_chamfer_radius = rib_chamfer_radius_narrow
-
-    print("New rib:", rib_position, rib_index, rib_type)
 
     if rib_wire.Length < 1:
       return
@@ -914,7 +1085,9 @@ class Components:
         continue
 
       # Curve ribs away from skin between stringers.
-      diff = (vertex - previous).normalize() * rib_outside_relief
+      diff = (vertex - previous)
+      diff.normalize()
+      diff *= rib_outside_relief
       cross = (diff / 2).cross(App.Vector(0, 1, 0))
       new = (previous + vertex) / 2 + cross
       arc = Part.Arc(previous, new, vertex).toShape()
@@ -1058,8 +1231,10 @@ class Components:
         continue
       previous = offset_edge
 
-      v1 = (common - other[0]).normalize()
-      v2 = (common - other[1]).normalize()
+      v1 = (common - other[0])
+      v1.normalize()
+      v2 = (common - other[1])
+      v2.normalize()
 
       angle = math.acos(v1.dot(v2))
       #print(round(math.degrees(angle)))
@@ -1116,6 +1291,8 @@ class Components:
     deck_length = dimensions.get("deck_length")
     dagger_board = doc.getObjectsByLabel('dagger_board')[0]
 
+    print("Calculating stem")
+
     min_y = -deck_length.Value / 2
     max_y = dagger_board.Shape.BoundBox.YMin
 
@@ -1132,6 +1309,8 @@ class Components:
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     deck_length = dimensions.get("deck_length")
     dagger_board = doc.getObjectsByLabel('dagger_board')[0]
+
+    print("Calculating stern")
 
     min_y = dagger_board.Shape.BoundBox.YMax
     max_y = deck_length.Value / 2
@@ -1202,6 +1381,8 @@ class Components:
     keelson_depth = dimensions.get("keelson_depth")
     accurate_stringers = dimensions.get("accurate_stringers")
 
+    print("Calculating keelson")
+
     #box = Part.makeBox(2, keelson_length, prow_height, App.Vector(-1, -keelson_length / 2, 0), App.Vector(0, 0, 1))
     #section = box.common(profile_keel.Shape)
     #section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
@@ -1220,6 +1401,7 @@ class Components:
 
   def mirror_sides(self):
     for rib_position, rib in self.ribs.items():
+      print(f"Mirroring rib {rib_position}")
       rib_mirrored = rib.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       rib = rib.fuse(rib_mirrored)
       rib = rib.removeSplitter()
@@ -1230,6 +1412,7 @@ class Components:
       self.components_flat[name] = rib
 
     for stringer in self.stringers:
+      print("Mirroring stringer")
       stringer_mirrored = stringer.copy().mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
       #stringer = stringer.fuse(stringer_mirrored)
       name = f"stringer_{round(stringer.BoundBox.ZMin)}"
@@ -1244,8 +1427,20 @@ class Components:
       self.components_bulk[name_port] = stringer
       self.components_bulk[name_starboard] = stringer_mirrored
 
+    for index, plank in enumerate(self.planks):
+      plank_mirrored = plank.mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+      name = f"plank_{index}"
+      name_port = f"{name}_port"
+      name_starboard = f"{name}_starboard"
+
+      plank_mirrored_display = Part.show(plank_mirrored, name_starboard)
+      self.solid_planks_group.addObject(plank_mirrored_display)
+
+      self.components_bulk[name_port] = plank
+      self.components_bulk[name_starboard] = plank_mirrored
+
   @classmethod
-  def diagonal_normal_at(cls, diagonal, point):
+  def diagonal_normal_at(cls, diagonal):
     for diagonal_edge in diagonal.Edges:
       plane = diagonal_edge.Curve.toShape().findPlane()
       if plane:
@@ -1423,7 +1618,7 @@ class Layout:
     self.components = components
     self.cutouts = create_group(doc, "cutouts", type_ = 'App::Part')
     self.cutouts.Visibility = False
-    self.scratch = create_group(self.doc, "scratch")
+    self.scratch = create_group(self.doc, "scratch_plans")
     self.scratch.Visibility = False
     self.plans = create_group(self.doc, "plans")
 
@@ -1485,30 +1680,6 @@ class Layout:
       body.Placement = App.Placement(App.Vector(x_pos, y_pos, z_pos), direction, 90)
 
       self.bodies[label] = body
-
-  """
-  def project(self, solid, direction):
-    x = 3000
-    y = 4000
-    z = 1000
-    plane = Part.makePlane(x, y, FreeCAD.Vector(-x / 2, -y / 2, 0), direction)
-    #Part.show(plane, "plane")
-    projected_edges = []
-    for wire in solid.Edges:
-      projected = plane.makeParallelProjection(wire, direction)
-      projected_edges += projected.Edges
-
-    sorted_edges = Part.sortEdges(projected_edges)
-    face = Part.Face()
-    for edges in sorted_edges:
-      one_wire = Part.Wire(edges)
-      #Part.show(one_wire, "one_wire")
-      if one_wire.isClosed():
-        one_face = Part.Face(one_wire)
-        Part.show(one_face, "one_face")
-        face = face.fuse(one_face)
-    Part.show(face, "face")
-  """
 
   def draw_plans(self):
     for label, body in self.bodies.items():
@@ -1613,15 +1784,13 @@ def perpendicular(wire, position):
           print(shape)
           continue
 
-        angle = vector.normalize().getAngle(App.Vector(0, 0, 1))
+        vector.normalize()
+        angle = vector.getAngle(App.Vector(0, 0, 1))
         print(angle, math.degrees(angle))
         angle += math.radians(10)
 
         z = position.z - position.x / math.tan(-angle)
         print(round(z, 2))
-
-        #Part.show(Part.makeLine(position, App.Vector(0, 0, z)),  "line")
-        #Part.show(Part.makeLine(position, position + vector.normalize() * 500), "line")
 
         return (angle, z)
   return None
@@ -1736,13 +1905,13 @@ if body:
   data_xz = Slice_Diagonals(doc, body, data_z)
   View_Wireframe_Diagonals(body.Name, doc, body, data_xz)
 
-#  lowest_point = min(data_x.lowest_point, data_y.lowest_point, data_z.lowest_point)
-#
-#  Plans(doc, body.Name, lowest_point)
-#
+  lowest_point = min(data_x.lowest_point, data_y.lowest_point, data_z.lowest_point)
+
+  Plans(doc, body.Name, lowest_point)
+
   components = Components(doc, body.Name, body.Shape, data_xz)
-#  Layout(doc, components)
-#  Mass(doc, components)
+  Layout(doc, components)
+  Mass(doc, components)
 
 else:
   print("No hull selected.")

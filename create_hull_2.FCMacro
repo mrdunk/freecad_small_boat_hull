@@ -107,6 +107,8 @@ class Hull:
         self.loft()
         self.transom()
 
+        Gui.updateGui()
+
     def draw_template(self, deck_width, deck_height, curve_width, curve_height, keel_height):
         """ Not used. Would create a base cross section template. """
         print(f"\t  {deck_width=} {deck_height=} {curve_width=} {curve_height=} {keel_height=}")
