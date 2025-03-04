@@ -639,8 +639,6 @@ class Components:
       diagonal_wire = diagonal_shape.Wires[0]
 
       if last_diagonal_wire is not None:
-        #diagonal_wire = last_diagonal_wire.makeHomogenousWires(diagonal_wire)
-
         print(f"Calculating plank: {plank_count=}, {angle=}, {height=}, {first_plank=}, {last_plank=}")
 
         top, bottom = self.apply_plank_overlaps(diagonal_wire, last_diagonal_wire, top_overlap=not last_plank, bottom_overlap=not first_plank)
@@ -696,10 +694,6 @@ class Components:
     bottom_v_0 = None
     bottom_v_1 = None
     for top_v_2, bottom_v_2 in zip(top + [None], bottom + [None]):
-      #if top_v_2:
-      #  top_v_2 = top_v_2.Point
-      #  bottom_v_2 = bottom_v_2.Point
-
       top_first = top_v_1
       top_last = top_v_1
       bottom_first = bottom_v_1
@@ -732,7 +726,8 @@ class Components:
       bottom_v_1 = bottom_v_2
 
   def solid_plank(self, top, bottom):
-    plank_thickness = 6
+    dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+    plank_thickness = dimensions.get(f"plank_thickness")
     cross_sections = []
 
     for top_v, bottom_v, top_perpendicular, bottom_perpendicular in self.iterate_plank_edges(top, bottom):
@@ -764,8 +759,10 @@ class Components:
     self.planks.append(additive_loft.Shape)
 
   def apply_plank_overlaps(self, top_wire, bottom_wire, top_overlap=True, bottom_overlap=True):
-    overlap_len = 20
-    lap_depth = 3
+    dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+    lap_depth = dimensions.get(f"lap_depth")
+    lap_overlap = dimensions.get(f"lap_overlap")
+
     point_count = int(top_wire.Length / 50)
 
     top_wire = Part.Wire(top_wire.copy().Edges)
@@ -787,7 +784,7 @@ class Components:
         bottom_v = bottom_v - bottom_perpendicular * lap_depth
         plank_vector = bottom_v - top_v
         plank_vector.normalize()
-        overlap_bottom_v = bottom_v + (plank_vector * overlap_len)
+        overlap_bottom_v = bottom_v + (plank_vector * lap_overlap)
 
       if last_top is not None:
         top_edges.append(Part.makeLine(last_top, top_v))
@@ -967,6 +964,7 @@ class Components:
     deck_width = dimensions.get("deck_width")
     deck_height = dimensions.get("deck_height")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
+    lap_depth = dimensions.get(f"lap_depth")
 
     rib_plane = Part.Plane(App.Vector(0, int(rib_position), 0), App.Vector(0, 1, 0))
 
@@ -987,8 +985,8 @@ class Components:
           plank_normal.normalize()
           plank_perpendicular = App.Vector(plank_normal.z, plank_normal.y, -plank_normal.x)
           plank_perpendicular.normalize()
-          rib_vertexes.append(point - plank_perpendicular * 3)
-          rib_vertexes.append(point + plank_perpendicular * 3)
+          rib_vertexes.append(point - plank_perpendicular * lap_depth)
+          rib_vertexes.append(point + plank_perpendicular * lap_depth)
         last_point = point
     # Add gunwale vertex.
     rib_vertexes.append(App.Vector(rib_wire.BoundBox.XMax, int(rib_position), rib_wire.BoundBox.ZMax))
