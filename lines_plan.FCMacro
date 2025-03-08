@@ -517,6 +517,8 @@ class Plans:
 
 class Components:
   stringers = []
+  planks = []
+  keelson = None
   stringers_deep = []
   ribs = {}
   components_flat = {}
@@ -535,13 +537,13 @@ class Components:
     self.plans_planks_group = None
     self.solid_planks_group = None
 
-    self.draw_planking()
     self.draw_stringers()
     self.draw_gunwale()
 
     self.draw_stem()
     self.draw_stern()
     self.draw_keelson()
+    self.draw_planking()
     self.draw_daggerboard_case()
 
     label = f"{parent_name}__wireframe_body_fore"
@@ -599,8 +601,17 @@ class Components:
       yield (shape, self.diagonal_normal_at(shape))
 
   def draw_planking(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    prow_height = dimensions.get("prow_height")
+    hull_type = dimensions.get("hull_type")
+    hull_type = dimensions.get("hull_type")
+
+    if hull_type != "plank":
+      return
+
     self.scratch = create_group(self.doc, "scratch_planks")
     self.scratch.Visibility = False
+
 
     self.planks = []
 
@@ -616,10 +627,6 @@ class Components:
       self.solid_planks_group = create_group(doc, f"solid_planks")
       self.group.addObjects([self.solid_planks_group])
       self.solid_planks_group.Visibility = True
-
-    dimensions = doc.getObjectsByLabel("dimensions")[0]
-    prow_height = dimensions.get("prow_height")
-    hull_type = dimensions.get("hull_type")
 
     gunwale_wire = self.gunwale_wire()
     gunwale_wire.reverse()
@@ -762,6 +769,7 @@ class Components:
     dimensions = self.doc.getObjectsByLabel("dimensions")[0]
     lap_depth = dimensions.get(f"lap_depth")
     lap_overlap = dimensions.get(f"lap_overlap")
+    rib_thickness = dimensions.get("rib_thickness")
 
     point_count = int(top_wire.Length / 50)
 
@@ -797,6 +805,14 @@ class Components:
     new_top_wire = Part.Wire(top_edges)
     new_bottom_wire = Part.Wire(bottom_edges)
     overlap_bottom_wire = Part.Wire(overlap_bottom_edges)
+
+    if not bottom_overlap:
+      # Bottom plank doesn't overlap keel.
+      overlap_bottom_wire = overlap_bottom_wire.translate(App.Vector(1, 0, 0) * rib_thickness / 2)
+
+    new_top_wire = new_top_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
+    overlap_bottom_wire = overlap_bottom_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
+
     #Part.show(new_top_wire, "new_top_wire")
     #Part.show(new_bottom_wire, "new_bottom_wire")
     #Part.show(overlap_bottom_wire, "overlap_bottom_wire")
@@ -953,6 +969,7 @@ class Components:
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     rib_thickness = dimensions.get("rib_thickness").Value
     rib_depth = dimensions.get("rib_depth").Value
+    rib_bulkhead_depth = dimensions.get("rib_bulkhead_depth").Value
     rib_thwart_depth = dimensions.get("rib_thwart_depth").Value
     brace_width = dimensions.get("brace_width").Value
     brace_width_narrow = dimensions.get("brace_width_narrow").Value
@@ -965,6 +982,9 @@ class Components:
     deck_height = dimensions.get("deck_height")
     rib_type = dimensions.get(f"rib_type_{rib_index}")
     lap_depth = dimensions.get(f"lap_depth")
+
+    if rib_type == "bulkhead":
+      rib_depth = rib_bulkhead_depth
 
     rib_plane = Part.Plane(App.Vector(0, int(rib_position), 0), App.Vector(0, 1, 0))
 
@@ -1001,16 +1021,54 @@ class Components:
       if not first_vertex:
         first_vertex = rib_vertex
 
-    rib_edges.append(Part.LineSegment(last_verex, App.Vector(0, last_verex.y, last_verex.z)))
-    rib_edges.append(Part.LineSegment(App.Vector(0, last_verex.y, last_verex.z), first_vertex))
+    outer_wire = Part.Wire(Part.Shape(rib_edges).Edges)
+    inner_wire = rib_wire.makeOffset2D(-rib_depth, openResult = True)
 
+    rib_wire_mask = Part.makeBox(outer_wire.BoundBox.XLength * 2, 2, outer_wire.BoundBox.ZLength - 1e-1,
+                                   App.Vector(0, outer_wire.BoundBox.YMax, outer_wire.BoundBox.ZMin))
+    outer_wire = outer_wire.common(rib_wire_mask).Wires[0]
+    inner_wire = inner_wire.common(rib_wire_mask).Wires[0]
+
+    top_edge = Part.LineSegment(outer_wire.OrderedVertexes[-1].Point, inner_wire.OrderedVertexes[0].Point)
+    bottom_edge = Part.LineSegment(outer_wire.OrderedVertexes[0].Point, inner_wire.OrderedVertexes[-1].Point)
+    rib_edges = outer_wire.Edges + [top_edge] + inner_wire.Edges + [bottom_edge]
     rib_wire = Part.Wire(Part.Shape(rib_edges).Edges)
-    rib_wire = rib_wire.cleaned()
-    #Part.show(rib_wire, "rib_wire")
-
     rib_face = Part.makeFace([rib_wire])
+    #Part.show(rib_face, "rib_face")
+
+    thwart_mask = Part.makeBox(outer_wire.BoundBox.XLength * 2, 2, thwart_height - outer_wire.BoundBox.ZMin,
+                               App.Vector(0, outer_wire.BoundBox.YMax, outer_wire.BoundBox.ZMin))
+    thwart_outer_wire = outer_wire.common(thwart_mask).Wires[0]
+
+    thwart_top_edge = Part.LineSegment(thwart_outer_wire.OrderedVertexes[-1].Point,
+                                       App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_height))
+    thwart_center_edge = Part.LineSegment(App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_height),
+                                          App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_outer_wire.BoundBox.ZMin))
+    thwart_edges = thwart_outer_wire.Edges + [thwart_top_edge, thwart_center_edge]
+
+    thwart_wire = Part.Wire(Part.Shape(thwart_edges).Edges)
+    thwart_face = Part.makeFace([thwart_wire])
+    #Part.show(thwart_face, "thwart_face")
+
+    rib_face = rib_face.fuse(thwart_face)
+    rib_face = rib_face.cleaned()
+    rib_face.removeInternalWires(1)
+    rib_face = rib_face.removeSplitter()
+    #Part.show(rib_face, "rib_face")
+
+    for stringer in self.stringers:
+      for solid in stringer.Solids:
+        rib_face = rib_face.cut(solid)
+    if self.keelson:
+      rib_face = rib_face.cut(self.keelson)
+    for stem in self.stem:
+      rib_face = rib_face.cut(self.stem)
+    for stern in self.stern:
+      rib_face = rib_face.cut(self.stern)
+
     rib_face.translate(-App.Vector(0, 1, 0) * rib_thickness / 2)
     rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_thickness)
+
     self.ribs[rib_position] = rib_solid
 
   def draw_rib_sof(self, doc, rib_position: float, rib_index: int, rib_wire: Part.Wire):
@@ -1106,8 +1164,8 @@ class Components:
     outer_ends = get_wire_ends(outer_rib_wire)
     inner_ends = get_wire_ends(inner_rib_wire)
 
-    bottom = Part.makeLine(outer_ends[0], inner_ends[-1])
-    top = Part.makeLine(inner_ends[0], outer_ends[-1])
+    bottom = Part.makeLine(outer_ends[-1], inner_ends[-1])
+    top = Part.makeLine(inner_ends[0], outer_ends[0])
     inner_rib_wire.add(top)
     inner_rib_wire.add(bottom)
     rib_wire = Part.Wire([inner_rib_wire, outer_rib_wire], closed = True)
@@ -1181,7 +1239,12 @@ class Components:
     for stringer_deep in self.stringers_deep:
       for solid in stringer_deep.Solids:
         rib_face = rib_face.cut(solid)
-    rib_face = rib_face.cut(self.keelson).cut(self.stem).cut(self.stern)
+    if self.keelson:
+      rib_face = rib_face.cut(self.keelson)
+    for stem in self.stem:
+      rib_face = rib_face.cut(self.stem)
+    for stern in self.stern:
+      rib_face = rib_face.cut(self.stern)
 
     rib_solid = rib_face.extrude(App.Vector(0, 1, 0) * rib_thickness)
 
@@ -1294,14 +1357,17 @@ class Components:
     min_y = -deck_length.Value / 2
     max_y = dagger_board.Shape.BoundBox.YMin
 
-    part_3d = self.draw_stem_stern(min_y, max_y)
-    part_3d = self.trim_transom(part_3d)
-
     group_component = create_group(doc, f"stem")
     self.group.addObjects([group_component])
-    group_component.addObjects([ Part.show(part_3d) ])
-    self.stem = part_3d
-    self.components_flat["stem"] = part_3d
+
+    parts_3d = self.draw_stem_stern(min_y, max_y)
+    for part_3d in parts_3d:
+      part_3d = self.trim_transom(part_3d)
+      group_component.addObjects([ Part.show(part_3d) ])
+
+    self.stem = parts_3d
+    for index, part_3d in enumerate(parts_3d):
+      self.components_flat[f"stem_{index}"] = part_3d
 
   def draw_stern(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -1313,20 +1379,26 @@ class Components:
     min_y = dagger_board.Shape.BoundBox.YMax
     max_y = deck_length.Value / 2
 
-    part_3d = self.draw_stem_stern(min_y, max_y)
-    part_3d = self.trim_transom(part_3d)
-
     group_component = create_group(doc, f"stern")
     self.group.addObjects([group_component])
-    group_component.addObjects([ Part.show(part_3d) ])
-    self.stern = part_3d
-    self.components_flat["stern"] = part_3d
+
+    parts_3d = self.draw_stem_stern(min_y, max_y)
+    for part_3d in parts_3d:
+      part_3d = self.trim_transom(part_3d)
+      group_component.addObjects([ Part.show(part_3d) ])
+
+    self.stern = parts_3d
+    for index, part_3d in enumerate(parts_3d):
+      self.components_flat[f"strn_{index}"] = part_3d
 
   def draw_stem_stern(self, min_y, max_y):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stem_depth = dimensions.get("stem_depth")
+    stem_height = dimensions.get("stem_height")
     rib_thickness = dimensions.get("rib_thickness")
+    hull_type = dimensions.get("hull_type")
+    plank_thickness = dimensions.get(f"plank_thickness")
     max_z = self.hull.BoundBox.ZMax
     min_z = 0
 
@@ -1339,8 +1411,19 @@ class Components:
       if longest is None or wire.Length > longest.Length:
         longest = wire
 
-    offset = longest.makeOffset2D(-stem_depth, openResult = True, fill = True)
-    part_3d = offset.extrude(App.Vector(1, 0, 0) * rib_thickness)
+    outside = longest.makeOffset2D(stem_depth, openResult = True)
+
+    inside_center = outside.makeOffset2D(stem_height + stem_depth, openResult = True, fill = True)
+    part_3d_center = inside_center.extrude(App.Vector(1, 0, 0) * rib_thickness)
+
+    if hull_type == "plank":
+      outside = outside.translate(App.Vector(1, 0, 0) * rib_thickness)
+      inside_port = outside.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = True)
+      part_3d_port = inside_port.extrude(App.Vector(1, 0, 0) * rib_thickness)
+
+      outside = outside.translate(App.Vector(1, 0, 0) * -2 * rib_thickness.Value)
+      inside_starboard = outside.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = True)
+      part_3d_starboard = inside_starboard.extrude(App.Vector(1, 0, 0) * rib_thickness)
 
     index = 0
     while True:
@@ -1361,23 +1444,27 @@ class Components:
         continue
 
       intersect = Part.makeLine(App.Vector(0, rib_position, self.hull.BoundBox.ZMin), App.Vector(0, rib_position, self.hull.BoundBox.ZMax))
-      high_point = intersect.common(part_3d).BoundBox.ZMax
+      high_point = intersect.common(part_3d_center).BoundBox.ZMax
 
-      slot = Part.makeBox(rib_thickness * 2, rib_thickness.Value + 0.2, stem_depth,
+      slot = Part.makeBox(rib_thickness * 2, rib_thickness.Value + 0.2, stem_height,
                           App.Vector(-rib_thickness, rib_position - rib_thickness.Value / 2 - 0.1
-                                     , high_point - stem_depth.Value / 2), App.Vector(0, 0, 1))
-      part_3d = part_3d.cut(slot)
+                                     , high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
+      part_3d_center = part_3d_center.cut(slot)
 
-    return part_3d
+    return [part_3d_center, part_3d_port, part_3d_starboard]
 
   def draw_keelson(self):
     #profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
+    do_keelson = dimensions.get("keelson")
     prow_height = dimensions.get("prow_height")
     keelson_length = dimensions.get("keelson_length")
     keelson_width = dimensions.get("keelson_width")
     keelson_depth = dimensions.get("keelson_depth")
     accurate_stringers = dimensions.get("accurate_stringers")
+
+    if int(do_keelson) <= 0:
+      return
 
     print("Calculating keelson")
 
@@ -1434,8 +1521,8 @@ class Components:
       plank_mirrored_display = Part.show(plank_mirrored, name_starboard)
       self.solid_planks_group.addObject(plank_mirrored_display)
 
-      self.components_bulk[name_port] = plank
-      self.components_bulk[name_starboard] = plank_mirrored
+      self.components_flat[name_port] = plank
+      self.components_flat[name_starboard] = plank_mirrored
 
   @classmethod
   def diagonal_normal_at(cls, diagonal):
@@ -1451,12 +1538,13 @@ class Components:
     stringer_depth = dimensions.get("stringer_depth")
     deck_thickness = dimensions.get("deck_thickness")
     deck_width = dimensions.get("deck_width")
+    deck_gap = dimensions.get("deck_gap")
     rib_thickness = dimensions.get("rib_thickness")
 
     deck_section_indexes = [
-        #(0, 2),
-        #(3, 4),
-        #(6, 8)
+        (0, 2),
+        (3, 4),
+        (6, 8)
         ]
     index = 0
     while True:
@@ -1484,7 +1572,7 @@ class Components:
     deck_plan = self.hull.common(plane)
     outline = clean_wire(deck_plan.Wires[0])
 
-    offset = outline.makeOffset2D(-stringer_depth * 1.5, openResult = False)
+    offset = outline.makeOffset2D(-deck_gap, openResult = False)
     offset.fix(0.1, 0, 1)
     #Part.show(offset, "offset")
 
@@ -1639,7 +1727,7 @@ class Layout:
         y_pos = y_pos_offset
         y_pos_mod += component.BoundBox.ZLength + 50
         z_pos = -component.BoundBox.YMin
-      elif label in ["stem", "stern"]:
+      elif label.split("_")[0] in ["stem", "stern"]:
         direction = App.Vector(0, 1, 0)
         x_pos = x_pos_offset
         y_pos = -component.BoundBox.YMax + y_pos_offset
@@ -1681,6 +1769,9 @@ class Layout:
 
   def draw_plans(self):
     for label, body in self.bodies.items():
+      if "plank"in label:
+        continue
+
       link = doc.addObject('App::Link', f"link_cutout_{label}")
       link.setLink(body)
       link.Label = f"link_cutout_{label}"
