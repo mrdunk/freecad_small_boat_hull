@@ -1336,10 +1336,12 @@ class Components:
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     thwart_height = dimensions.get("thwart_height")
     rib_thickness = dimensions.get("rib_thickness")
+    rib_thickness = dimensions.get("rib_thickness")
+    stem_depth = dimensions.get("stem_depth")
     dagger_board = doc.getObjectsByLabel('dagger_board')[0]
 
-    case = Part.makeBox(rib_thickness * 3, dagger_board.Shape.BoundBox.YLength, thwart_height,
-                        App.Vector(-rib_thickness * 1.5, dagger_board.Shape.BoundBox.YMin, 0), App.Vector(0, 0, 1))
+    case = Part.makeBox(rib_thickness * 3, dagger_board.Shape.BoundBox.YLength, thwart_height + stem_depth,
+                        App.Vector(-rib_thickness * 1.5, dagger_board.Shape.BoundBox.YMin, -stem_depth), App.Vector(0, 0, 1))
 
     group_component = create_group(doc, f"dagger_board_case")
     self.group.addObjects([group_component])
@@ -1350,6 +1352,7 @@ class Components:
   def draw_stem(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     deck_length = dimensions.get("deck_length")
+    stem_height = dimensions.get("stem_height")
     dagger_board = doc.getObjectsByLabel('dagger_board')[0]
 
     print("Calculating stem")
@@ -1360,7 +1363,7 @@ class Components:
     group_component = create_group(doc, f"stem")
     self.group.addObjects([group_component])
 
-    parts_3d = self.draw_stem_stern(min_y, max_y)
+    parts_3d = self.draw_stem_stern(min_y, max_y, stem_height, figure_head=True)
     for part_3d in parts_3d:
       part_3d = self.trim_transom(part_3d)
       group_component.addObjects([ Part.show(part_3d) ])
@@ -1372,6 +1375,7 @@ class Components:
   def draw_stern(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     deck_length = dimensions.get("deck_length")
+    stern_height = dimensions.get("stern_height")
     dagger_board = doc.getObjectsByLabel('dagger_board')[0]
 
     print("Calculating stern")
@@ -1382,7 +1386,7 @@ class Components:
     group_component = create_group(doc, f"stern")
     self.group.addObjects([group_component])
 
-    parts_3d = self.draw_stem_stern(min_y, max_y)
+    parts_3d = self.draw_stem_stern(min_y, max_y, stern_height, skeg=True)
     for part_3d in parts_3d:
       part_3d = self.trim_transom(part_3d)
       group_component.addObjects([ Part.show(part_3d) ])
@@ -1391,18 +1395,21 @@ class Components:
     for index, part_3d in enumerate(parts_3d):
       self.components_flat[f"strn_{index}"] = part_3d
 
-  def draw_stem_stern(self, min_y, max_y):
+  def draw_stem_stern(self, min_y, max_y, max_z, skeg=False, figure_head=False):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
     stem_depth = dimensions.get("stem_depth")
     stem_height = dimensions.get("stem_height")
     rib_thickness = dimensions.get("rib_thickness")
     hull_type = dimensions.get("hull_type")
-    plank_thickness = dimensions.get(f"plank_thickness")
-    max_z = self.hull.BoundBox.ZMax
+    plank_thickness = dimensions.get("plank_thickness")
+    transom_angle = dimensions.get("transom_angle")
+
+    circle_face = None
+    hull_max_z = self.hull.BoundBox.ZMax
     min_z = 0
 
-    box = Part.makeBox(2, max_y - min_y, max_z, App.Vector(-1, min_y, min_z), App.Vector(0, 0, 1))
+    box = Part.makeBox(2, max_y - min_y, hull_max_z, App.Vector(-1, min_y, min_z), App.Vector(0, 0, 1))
     section = box.common(profile_keel.Shape)
     section = section.translate(App.Vector(1, 0, 0) * -rib_thickness / 2)
 
@@ -1411,19 +1418,66 @@ class Components:
       if longest is None or wire.Length > longest.Length:
         longest = wire
 
-    outside = longest.makeOffset2D(stem_depth, openResult = True)
+    outline = longest.makeOffset2D(stem_depth, openResult = True)
+    if skeg:
+      first = outline.OrderedVertexes[0].Point
+      last = outline.OrderedVertexes[-1].Point
+      start = first if first.y < last.y else last
+      end = first if first.y > last.y else last
+      y = end.y / math.tan(transom_angle)
+      corner = App.Vector(end.x, end.y + y, -stem_depth)
+      end = App.Vector(end.x, end.y, max_z)
+      skeg_edges = [
+          Part.makeLine(end, corner),
+          Part.makeLine(corner, start)
+          ]
+      outside = Part.Wire(skeg_edges)
+    else:
+      outside = outline
 
-    inside_center = outside.makeOffset2D(stem_height + stem_depth, openResult = True, fill = True)
-    part_3d_center = inside_center.extrude(App.Vector(1, 0, 0) * rib_thickness)
+    inside_center = outline.makeOffset2D(stem_height + stem_depth, openResult = True, fill = False)
+    face = Part.Face(
+        Part.Wire([
+          outside,
+          Part.makeLine(outside.OrderedVertexes[0].Point, inside_center.OrderedVertexes[-1].Point),
+          inside_center,
+          Part.makeLine(outside.OrderedVertexes[-1].Point, inside_center.OrderedVertexes[0].Point),
+          ])
+        )
+    if figure_head:
+      first = inside_center.OrderedVertexes[0]
+      last = inside_center.OrderedVertexes[-1]
+      center = first if first.Z > last.Z else last
+      circle = Part.makeCircle(stem_height + stem_depth, center.Point, App.Vector(-1, 0, 0))
+      circle_face = Part.makeFace([circle])
+      face_tmp = circle_face.cut(face)
+      face_tmp = face_tmp.fuse(face)
+      face = face_tmp
+      face = face.removeSplitter()
+
+    part_3d_center = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
 
     if hull_type == "plank":
-      outside = outside.translate(App.Vector(1, 0, 0) * rib_thickness)
-      inside_port = outside.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = True)
-      part_3d_port = inside_port.extrude(App.Vector(1, 0, 0) * rib_thickness)
+      inside_sides = outline.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = False)
+      face = Part.Face(
+          Part.Wire([
+            outside,
+            Part.makeLine(outside.OrderedVertexes[0].Point, inside_sides.OrderedVertexes[-1].Point),
+            inside_sides,
+            Part.makeLine(outside.OrderedVertexes[-1].Point, inside_sides.OrderedVertexes[0].Point),
+            ])
+          )
 
-      outside = outside.translate(App.Vector(1, 0, 0) * -2 * rib_thickness.Value)
-      inside_starboard = outside.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = True)
-      part_3d_starboard = inside_starboard.extrude(App.Vector(1, 0, 0) * rib_thickness)
+      if figure_head:
+        face_tmp = circle_face.cut(face)
+        face_tmp = face_tmp.fuse(face)
+        face = face_tmp
+
+      part_3d = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
+      part_3d = part_3d.removeSplitter()
+
+      part_3d_port = part_3d.copy().translate(App.Vector(1, 0, 0) * rib_thickness)
+      part_3d_starboard = part_3d.copy().translate(App.Vector(1, 0, 0) * -rib_thickness)
 
     index = 0
     while True:
@@ -1447,8 +1501,8 @@ class Components:
       high_point = intersect.common(part_3d_center).BoundBox.ZMax
 
       slot = Part.makeBox(rib_thickness * 2, rib_thickness.Value + 0.2, stem_height,
-                          App.Vector(-rib_thickness, rib_position - rib_thickness.Value / 2 - 0.1
-                                     , high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
+                          App.Vector(-rib_thickness, rib_position - rib_thickness.Value / 2 - 0.1,
+                                     high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
       part_3d_center = part_3d_center.cut(slot)
 
     return [part_3d_center, part_3d_port, part_3d_starboard]
