@@ -802,9 +802,17 @@ class Components:
       last_bottom = bottom_v
       last_overlap_bottom = overlap_bottom_v
 
-    new_top_wire = Part.Wire(top_edges)
-    new_bottom_wire = Part.Wire(bottom_edges)
-    overlap_bottom_wire = Part.Wire(overlap_bottom_edges)
+    top_edges = Part.sortEdges(top_edges)[0]
+    bottom_edges = Part.sortEdges(bottom_edges)[0]
+    overlap_bottom_edges = Part.sortEdges(overlap_bottom_edges)[0]
+
+    if top_edges[0].distToShape(bottom_edges[0])[0] > top_edges[-1].distToShape(bottom_edges[0])[0]:
+      bottom_edges = list(reversed(bottom_edges))
+      overlap_bottom_edges = list(reversed(overlap_bottom_edges))
+
+    new_top_wire = Part.Wire(Part.Shape(top_edges).Edges)
+    new_bottom_wire = Part.Wire(Part.Shape(bottom_edges).Edges)
+    overlap_bottom_wire = Part.Wire(Part.Shape(overlap_bottom_edges).Edges)
 
     if not bottom_overlap:
       # Bottom plank doesn't overlap keel.
@@ -1043,7 +1051,8 @@ class Components:
     thwart_top_edge = Part.LineSegment(thwart_outer_wire.OrderedVertexes[-1].Point,
                                        App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_height))
     thwart_center_edge = Part.LineSegment(App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_height),
-                                          App.Vector(0, thwart_outer_wire.BoundBox.YMax, thwart_outer_wire.BoundBox.ZMin))
+                                          thwart_outer_wire.OrderedVertexes[0].Point
+                                          )
     thwart_edges = thwart_outer_wire.Edges + [thwart_top_edge, thwart_center_edge]
 
     thwart_wire = Part.Wire(Part.Shape(thwart_edges).Edges)
@@ -1735,15 +1744,23 @@ class Mass:
 
     flat_volume_m3 = round(flat_volume, 5)
     bulk_volume_m3 = round(bulk_volume, 5)
+    total_volume_m3 = flat_volume_m3 + bulk_volume_m3
+    flat_weight_kg = flat_volume_m3 * plywood_density
+    bulk_weight_kg = bulk_volume_m3 * pine_density
+    total_weight_kg = flat_weight_kg + bulk_weight_kg
     print(
-        f"pine:    {bulk_volume_m3:4.5f}m³ {bulk_volume_m3 * pine_density:4.2f}kg")
+        f"pine:    {bulk_volume_m3:4.5f}m³ {bulk_weight_kg:4.2f}kg")
     print(
-        f"plywood: {flat_volume_m3:4.5f}m³ {flat_volume_m3 * plywood_density:4.2f}kg")
+        f"plywood: {flat_volume_m3:4.5f}m³ {flat_weight_kg:4.2f}kg")
+    print("---------------------------")
+    print(
+        f"total:   {total_volume_m3:4.5f}m³ {total_weight_kg:4.2f}kg")
+    print("---------------------------")
 
   def get_volume(self, parts, type_, density):
     total_volume = 0
     for label, component in parts.items():
-      volume = component.Volume / 1e9
+      volume = abs(component.Volume / 1e9)
       print(f"{label:<25}:{volume:4.5f}m³   {volume * density:4.2f}kg   {type_}")
       total_volume += volume
     return total_volume

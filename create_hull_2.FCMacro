@@ -195,7 +195,8 @@ class Hull:
         else:
             val = (b**2 + c**2 - a**2) / diviser
             A = 0
-            if abs(val) < 1 : A = math.acos(val)
+            if abs(val) < 1: 
+                A = math.acos(val)
 
         c_vec = upper_curve_center - origin
         rot = Rotation(App.Vector(0, 0, 1), math.degrees(A))
@@ -210,8 +211,8 @@ class Hull:
         if join_point.y > curve_top.y or join_point.y < origin.y:
             # Top curve is entirely above the deck
             # or
-            # op of top curve is narrower than widest point.
-            join_point = (curve_top + origin) / 2
+            # top of top curve is narrower than widest point.
+            join_point = origin + curve_top * 1e-6
             truncate_curve = True
 
         start_angle = -(join_point - deadrise_center).getAngle(up)
@@ -236,20 +237,14 @@ class Hull:
         self.constrain_to_point(sketch, deadrise_r, 2, mirror(join_point))
         self.constrain_to_point(sketch, deadrise_r, 1, origin)
 
-        if truncate_curve:
-            # Short straight line at the top to keep number of elements the same even though
-            # the original curve would have been entirely above deck height.
-            start_point = curve_top
-            end_point = join_point
-            upper_curve_geometry_l = Part.LineSegment(start_point, end_point)
-            upper_curve_geometry_r = Part.LineSegment(mirror(end_point), mirror(start_point))
-        else:
-            start_point = curve_top
-            end_point = join_point
-            start_angle = -(curve_top - upper_curve_center).getAngle(up)
-            end_angle = -(join_point - upper_curve_center).getAngle(up)
-            upper_curve_geometry_l = Part.ArcOfCircle(Part.Circle(upper_curve_center, axis, upper_curve_radius), start_angle, end_angle)
-            upper_curve_geometry_r = Part.ArcOfCircle(Part.Circle(mirror(upper_curve_center), axis, upper_curve_radius), math.pi - end_angle, math.pi - start_angle)
+        start_point = curve_top
+        end_point = join_point
+        start_angle = -(curve_top - upper_curve_center).getAngle(up)
+        end_angle = -(join_point - upper_curve_center).getAngle(up)
+        circle = Part.Circle(upper_curve_center, axis, upper_curve_radius)
+        upper_curve_geometry_l = Part.ArcOfCircle(circle, start_angle, end_angle)
+        circle = Part.Circle(mirror(upper_curve_center), axis, upper_curve_radius)
+        upper_curve_geometry_r = Part.ArcOfCircle(circle, math.pi - end_angle, math.pi - start_angle)
 
         upper_curve_l = sketch.addGeometry(upper_curve_geometry_l)
         upper_curve_r = sketch.addGeometry(upper_curve_geometry_r)
