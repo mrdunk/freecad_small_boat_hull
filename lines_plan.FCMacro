@@ -499,7 +499,7 @@ class Plans:
   def extra(self, group, offset_plan_profile):
     sketches = [
         doc.getObjectsByLabel('dagger_board')[0],
-        doc.getObjectsByLabel('rudder')[0],
+        #doc.getObjectsByLabel('rudder')[0],
         ]
 
     for sketch in sketches:
@@ -712,7 +712,7 @@ class Components:
         top_last = top_v_2
         bottom_last = bottom_v_2
 
-      if top_v_1:
+      if top_v_1 and bottom_last:
         top_normal = (top_last - top_first)
         top_normal.normalize()
         bottom_normal = (bottom_last - bottom_first)
@@ -771,7 +771,7 @@ class Components:
     lap_overlap = dimensions.get(f"lap_overlap")
     rib_thickness = dimensions.get("rib_thickness")
 
-    point_count = int(top_wire.Length / 50)
+    point_count = int(top_wire.Length / 20)
 
     top_wire = Part.Wire(top_wire.copy().Edges)
     bottom_wire = Part.Wire(bottom_wire.copy().Edges)
@@ -1402,7 +1402,7 @@ class Components:
 
     self.stern = parts_3d
     for index, part_3d in enumerate(parts_3d):
-      self.components_flat[f"strn_{index}"] = part_3d
+      self.components_flat[f"stern_{index}"] = part_3d
 
   def draw_stem_stern(self, min_y, max_y, max_z, skeg=False, figure_head=False):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
@@ -1413,6 +1413,80 @@ class Components:
     hull_type = dimensions.get("hull_type")
     plank_thickness = dimensions.get("plank_thickness")
     transom_angle = dimensions.get("transom_angle")
+
+    output_shapes = []
+
+    hull_max_z = self.hull.BoundBox.ZMax
+    min_z = 0
+
+    box = Part.makeBox(2, max_y - min_y, hull_max_z, App.Vector(-1, min_y, min_z), App.Vector(0, 0, 1))
+    section = box.common(profile_keel.Shape)
+    keel_wire = section.Wires[0]
+
+    for x_pos, inner_offset, outer_offset in (
+        (0, stem_height, stem_depth),
+        (-rib_thickness.Value, 0, stem_depth),
+        (rib_thickness.Value, 0, stem_depth)):
+      outer_wire = keel_wire.copy().translate(App.Vector(1, 0, 0) * (x_pos - (rib_thickness.Value / 2)))
+      outer_wire = self.offset_direction(outer_wire, outer_offset, down = True)
+
+      inner_wire = keel_wire.copy().translate(App.Vector(1, 0, 0) * (x_pos - (rib_thickness.Value / 2)))
+      inner_wire = self.offset_direction(inner_wire, inner_offset, down = False)
+
+      if skeg:
+        first = outer_wire.OrderedVertexes[0].Point
+        last = outer_wire.OrderedVertexes[-1].Point
+        start = first if first.y < last.y else last
+        end = first if first.y > last.y else last
+        y = end.y / math.tan(transom_angle)
+        corner = App.Vector(end.x, end.y + y, -stem_depth)
+        end = App.Vector(end.x, end.y, max_z)
+        skeg_edges = [
+            Part.makeLine(corner, start),
+            Part.makeLine(end, corner),
+            ]
+        outer_wire = Part.Wire(Part.sortEdges(skeg_edges)[0])
+        d1 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[0].Point)
+        d2 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[-1].Point)
+        if (d1 < d2):
+          print("reversing outer_wire")
+          outer_wire.reverse()
+
+      joined_wire = Part.Wire([
+            outer_wire,
+            Part.makeLine(outer_wire.OrderedVertexes[-1].Point, inner_wire.OrderedVertexes[0].Point),
+            inner_wire,
+            Part.makeLine(inner_wire.OrderedVertexes[-1].Point, outer_wire.OrderedVertexes[0].Point),
+            ])
+      #Part.show(joined_wire, "joined_wire")
+      face = Part.Face(joined_wire)
+
+      #Part.show(face, "face")
+      part_3d = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
+      output_shapes.append(part_3d)
+
+    return output_shapes
+
+  @classmethod
+  def offset_direction(cls, wire, distance, down: bool) -> Part.Wire:
+    min_z = wire.BoundBox.ZMin
+    wire_copy = wire.copy().makeOffset2D(distance, openResult = True)
+    min_z_copy = wire_copy.BoundBox.ZMin
+    if down == (min_z_copy < min_z):
+      return wire_copy
+    return wire.copy().makeOffset2D(-distance, openResult = True)
+
+  def draw_stem_stern_bak(self, min_y, max_y, max_z, skeg=False, figure_head=False):
+    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    stem_depth = dimensions.get("stem_depth")
+    stem_height = dimensions.get("stem_height")
+    rib_thickness = dimensions.get("rib_thickness")
+    hull_type = dimensions.get("hull_type")
+    plank_thickness = dimensions.get("plank_thickness")
+    transom_angle = dimensions.get("transom_angle")
+
+    hull_type = "nope"
 
     circle_face = None
     hull_max_z = self.hull.BoundBox.ZMax
@@ -1429,8 +1503,8 @@ class Components:
 
     outline = longest.makeOffset2D(stem_depth, openResult = True)
     if skeg:
-      first = outline.OrderedVertexes[0].Point
-      last = outline.OrderedVertexes[-1].Point
+      first = outline.copy().OrderedVertexes[0].Point
+      last = outline.copy().OrderedVertexes[-1].Point
       start = first if first.y < last.y else last
       end = first if first.y > last.y else last
       y = end.y / math.tan(transom_angle)
@@ -1442,9 +1516,9 @@ class Components:
           ]
       outside = Part.Wire(skeg_edges)
     else:
-      outside = outline
+      outside = outline.copy()
 
-    inside_center = outline.makeOffset2D(stem_height + stem_depth, openResult = True, fill = False)
+    inside_center = outline.copy().makeOffset2D(stem_height + stem_depth, openResult = True, fill = False)
     face = Part.Face(
         Part.Wire([
           outside,
@@ -1454,8 +1528,8 @@ class Components:
           ])
         )
     if figure_head:
-      first = inside_center.OrderedVertexes[0]
-      last = inside_center.OrderedVertexes[-1]
+      first = inside_center.copy().OrderedVertexes[0]
+      last = inside_center.copy().OrderedVertexes[-1]
       center = first if first.Z > last.Z else last
       circle = Part.makeCircle(stem_height + stem_depth, center.Point, App.Vector(-1, 0, 0))
       circle_face = Part.makeFace([circle])
@@ -1467,13 +1541,13 @@ class Components:
     part_3d_center = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
 
     if hull_type == "plank":
-      inside_sides = outline.makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = False)
+      inside_sides = outline.copy().makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = False)
       face = Part.Face(
           Part.Wire([
-            outside,
-            Part.makeLine(outside.OrderedVertexes[0].Point, inside_sides.OrderedVertexes[-1].Point),
+            outside.copy(),
+            Part.makeLine(outside.copy().OrderedVertexes[0].Point, inside_sides.OrderedVertexes[-1].Point),
             inside_sides,
-            Part.makeLine(outside.OrderedVertexes[-1].Point, inside_sides.OrderedVertexes[0].Point),
+            Part.makeLine(outside.copy().OrderedVertexes[-1].Point, inside_sides.OrderedVertexes[0].Point),
             ])
           )
 
@@ -1514,7 +1588,9 @@ class Components:
                                      high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
       part_3d_center = part_3d_center.cut(slot)
 
-    return [part_3d_center, part_3d_port, part_3d_starboard]
+    if hull_type == "plank":
+      return [part_3d_center, part_3d_port, part_3d_starboard]
+    return [part_3d_center]
 
   def draw_keelson(self):
     #profile_keel = doc.getObjectsByLabel('profile_keel')[0]
