@@ -280,27 +280,81 @@ class Hull:
         self.shape = additive_loft.Shape
 
     def transom(self):
-      dimensions = self.doc.getObjectsByLabel("dimensions")[0]
-      stern_height = dimensions.get("stern_height")
-      deck_width = dimensions.get("deck_width")
-      deck_length = dimensions.get("deck_length")
-      transom_angle = dimensions.get("transom_angle")
-      transom_overlap = dimensions.get("transom_overlap")
+        dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+        stern_height = dimensions.get("stern_height")
+        deck_width = dimensions.get("deck_width")
+        deck_length = dimensions.get("deck_length")
+        transom_angle = dimensions.get("transom_angle")
+        transom_overlap = dimensions.get("transom_overlap")
 
-      if transom_overlap.Value <= 0:
-        return
+        if transom_overlap.Value <= 0:
+          return
 
-      transom_mask = Part.makeBox(deck_width, transom_overlap * 3, stern_height * 3, 
-                                  App.Vector(-deck_width / 2, deck_length / 2, -stern_height),
-                                  App.Vector(0, 0, 1))
-      transom_mask = transom_mask.rotate(App.Vector(0, deck_length / 2, stern_height),
-                                         App.Vector(1, 0, 0),
-                                         -transom_angle)
+        transom_mask = Part.makeBox(deck_width, transom_overlap * 3, stern_height * 3, 
+                                    App.Vector(-deck_width / 2, deck_length / 2, -stern_height),
+                                    App.Vector(0, 0, 1))
+        transom_mask = transom_mask.rotate(App.Vector(0, deck_length / 2, stern_height),
+                                           App.Vector(1, 0, 0),
+                                           -transom_angle)
 
-      to_cut = self.hull.newObject('PartDesign::Boolean','Boolean')
-      to_cut.Type = "Cut"
-      to_cut.addObjects([Part.show(transom_mask, "transom_mask")])
-      App.ActiveDocument.recompute()
+        to_cut = self.hull.newObject('PartDesign::Boolean','Boolean')
+        to_cut.Type = "Cut"
+        to_cut.addObjects([Part.show(transom_mask, "transom_mask")])
+        App.ActiveDocument.recompute()
+
+    def bouancy_report(self):
+        self.water_angles = create_group(self.doc, "water_angles")
+        target_volume = 180
+        for heel_angle in range(0, 36, 5):
+            print(f"Drawing waterline at: {target_volume=} and {heel_angle=}.")
+            height, wet_hull, water = self.bouancy_boolean_search(heel_angle, target_volume)
+            wet_volume = round(wet_hull.Volume * 1e-6)
+            center_of_bouancy = wet_hull.CenterOfGravity
+            print(f"  {wet_volume=}, {center_of_bouancy.y=}")
+            wet_hull = Part.show(wet_hull, f"wet_hull_{heel_angle}")
+            wet_hull.Visibility = False
+            self.water_angles.addObject(wet_hull)
+            water = Part.show(water, f"water_{heel_angle}")
+            water.Visibility = False
+            self.water_angles.addObject(water)
+
+    def bouancy_boolean_search(self, angle, target_volume):
+      last_height = 90
+      height = 100
+      last_achieved_volume, _, _ = self.at_angle(angle, last_height)
+      while True:
+        achieved_volume, wet_hull, water = self.at_angle(angle, height)
+        #print(f"  {height=} {last_achieved_volume=} {achieved_volume=}")
+
+        if abs(achieved_volume - target_volume) <= 5:
+          return height, wet_hull, water
+
+        diff_volume = achieved_volume - last_achieved_volume
+        if abs(diff_volume) < 1e-3:
+          if achieved_volume > target_volume:
+            print("*+")
+            mod_height = -1e-3
+          else:
+            print("*-")
+            mod_height = 1e-3
+        else:
+          mod_height = (height - last_height) * (target_volume - last_achieved_volume) / (diff_volume * 2)
+
+        last_achieved_volume = achieved_volume
+        last_height = height
+        height += mod_height
+
+    def at_angle(self, angle, height):
+        rotation_axis = App.Vector(0, 1, 0)
+        water_shape = App.Vector(10000, 10000, 10000)
+        water_offset = App.Vector(-5000, -5000, -10000 + height)
+        water = Part.makeBox(water_shape.x, water_shape.y, water_shape.z,
+                             water_offset)
+
+        water.rotate(App.Vector(0, 0, 0), rotation_axis, angle)
+        wet_hull = self.hull.Shape.common(water)
+        wet_volume = wet_hull.Volume * 1e-6
+        return (wet_volume, wet_hull, water)
 
 
 def mirror(point):
@@ -339,4 +393,5 @@ def create_group(doc, name, element_type='App::DocumentObjectGroup'):
   return new
 
 
-Hull("boat")
+hull = Hull("boat")
+hull.bouancy_report()

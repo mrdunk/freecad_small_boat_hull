@@ -1656,7 +1656,8 @@ class Components:
       deck_part = mask.common(full_deck.copy())
 
       for key, value in self.components_flat.items():
-        if "rib" in key or key in ["step", "stern"]:
+        #if "rib" in key or "plank" in key or key in ["stem", "stern"]:
+        if key.split("_")[0] in ["rib", "stem", "stern"]:
           deck_part = deck_part.cut(value)
       #for value in self.stringers_deep:
       #  deck_part = deck_part.cut(value)
