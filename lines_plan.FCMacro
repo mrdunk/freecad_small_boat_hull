@@ -523,6 +523,7 @@ class Components:
   ribs = {}
   components_flat = {}
   components_bulk = {}
+  figurehead = None
 
   def __init__(self, doc, parent_name: str, body, diagonals: Slice_Diagonals):
     self.doc = doc
@@ -1424,14 +1425,14 @@ class Components:
     keel_wire = section.Wires[0]
 
     for x_pos, inner_offset, outer_offset in (
-        (0, stem_height, stem_depth),
-        (-rib_thickness.Value, 0, stem_depth),
-        (rib_thickness.Value, 0, stem_depth)):
+        (0,                    stem_height,            -stem_depth),
+        (-rib_thickness.Value, -plank_thickness.Value, -stem_depth),
+        (rib_thickness.Value,  -plank_thickness.Value, -stem_depth)):
       outer_wire = keel_wire.copy().translate(App.Vector(1, 0, 0) * (x_pos - (rib_thickness.Value / 2)))
-      outer_wire = self.offset_direction(outer_wire, outer_offset, down = True)
+      outer_wire = self.offset_direction(outer_wire, outer_offset)
 
       inner_wire = keel_wire.copy().translate(App.Vector(1, 0, 0) * (x_pos - (rib_thickness.Value / 2)))
-      inner_wire = self.offset_direction(inner_wire, inner_offset, down = False)
+      inner_wire = self.offset_direction(inner_wire, inner_offset)
 
       if skeg:
         first = outer_wire.OrderedVertexes[0].Point
@@ -1446,35 +1447,87 @@ class Components:
             Part.makeLine(end, corner),
             ]
         outer_wire = Part.Wire(Part.sortEdges(skeg_edges)[0])
-        d1 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[0].Point)
-        d2 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[-1].Point)
-        if (d1 < d2):
-          print("reversing outer_wire")
-          outer_wire.reverse()
 
-      joined_wire = Part.Wire([
-            outer_wire,
-            Part.makeLine(outer_wire.OrderedVertexes[-1].Point, inner_wire.OrderedVertexes[0].Point),
-            inner_wire,
-            Part.makeLine(inner_wire.OrderedVertexes[-1].Point, outer_wire.OrderedVertexes[0].Point),
-            ])
-      #Part.show(joined_wire, "joined_wire")
+      d1 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[0].Point)
+      d2 = outer_wire.OrderedVertexes[0].Point.distanceToPoint(inner_wire.OrderedVertexes[-1].Point)
+      if (d1 < d2):
+        print("reversing outer_wire")
+        outer_wire.reverse()
+
+      joined_wire = join_wires([
+        outer_wire,
+        Part.makeLine(outer_wire.OrderedVertexes[-1].Point, inner_wire.OrderedVertexes[0].Point),
+        inner_wire,
+        Part.makeLine(inner_wire.OrderedVertexes[-1].Point, outer_wire.OrderedVertexes[0].Point),
+        ])
       face = Part.Face(joined_wire)
-
+      if figure_head:
+        face = self.add_figgurehead(face, outer_wire, inner_wire)
       #Part.show(face, "face")
+
       part_3d = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
       output_shapes.append(part_3d)
+
+    index = 0
+    while True:
+      rib_pos_label = f"rib_positions_{index}"
+      rib_type_label = f"rib_type_{index}"
+      try:
+        rib_position = dimensions.get(rib_pos_label)
+        rib_type = dimensions.get(rib_type_label)
+      except ValueError:
+        break
+
+      index += 1
+
+      if rib_type == "skip":
+        continue
+
+      if rib_position < min_y or rib_position > max_y:
+        continue
+
+      intersect = Part.makeLine(App.Vector(0, rib_position, self.hull.BoundBox.ZMin), App.Vector(0, rib_position, self.hull.BoundBox.ZMax))
+      high_point = intersect.common(output_shapes[0]).BoundBox.ZMax
+
+      slot = Part.makeBox(rib_thickness * 2, rib_thickness.Value + 0.2, stem_height,
+                          App.Vector(-rib_thickness, rib_position - rib_thickness.Value / 2 - 0.1,
+                                     high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
+      output_shapes[0] = output_shapes[0].cut(slot)
 
     return output_shapes
 
   @classmethod
-  def offset_direction(cls, wire, distance, down: bool) -> Part.Wire:
+  def offset_direction(cls, wire: Part.Wire, distance: float) -> Part.Wire:
+    """
+    Args: distance: Negative results in wire being moved downwards. Positive = upwards.
+    """
     min_z = wire.BoundBox.ZMin
-    wire_copy = wire.copy().makeOffset2D(distance, openResult = True)
+    wire_copy = wire.copy().makeOffset2D(abs(distance), openResult = True)
     min_z_copy = wire_copy.BoundBox.ZMin
-    if down == (min_z_copy < min_z):
+    if (distance < 0) == (min_z_copy < min_z):
       return wire_copy
-    return wire.copy().makeOffset2D(-distance, openResult = True)
+
+    wire_copy =  wire.copy().makeOffset2D(-abs(distance), openResult = True)
+    return wire_copy
+
+  def add_figgurehead(self, face, outer_wire, inner_wire) -> Part.Face:
+    if not self.figurehead:
+      dimensions = doc.getObjectsByLabel("dimensions")[0]
+      stem_depth = dimensions.get("stem_depth")
+      stem_height = dimensions.get("stem_height")
+
+      first = inner_wire.OrderedVertexes[0]
+      last = outer_wire.OrderedVertexes[-1]
+      center = first if first.Z > last.Z else last
+      circle = Part.makeCircle(stem_height + stem_depth, center.Point, App.Vector(-1, 0, 0))
+      self.figurehead = Part.makeFace([circle])
+
+    face_tmp = self.figurehead.copy().translate(App.Vector(1, 0, 0) * (outer_wire.Vertexes[0].X - self.figurehead.BoundBox.XMin))
+    face_tmp = face_tmp.cut(face)
+    face_tmp = face_tmp.fuse(face)
+    face = face_tmp
+    face = face.removeSplitter()
+    return face
 
   def draw_stem_stern_bak(self, min_y, max_y, max_z, skeg=False, figure_head=False):
     profile_keel = doc.getObjectsByLabel('profile_keel')[0]
@@ -1976,25 +2029,8 @@ def addSelection(doc, label):
 
 
 def get_body():
-  selected_objects = Gui.Selection.getSelection()
-  if len(selected_objects) != 1:
-    return None
+  return App.ActiveDocument.getObject("hull")
 
-  selected_object = selected_objects[0]
-  if selected_object.TypeId == "PartDesign::Body":
-    if "__" in selected_object.Name:
-      original_name = selected_object.Name.split("__plan_")[0]
-      selected_object = doc.getObjectsByLabel(original_name)[0]
-    return selected_object
-
-  selected_object = selected_object.getParent()
-  if selected_object.TypeId == "PartDesign::Body":
-    if "__plan_" in selected_object.Name:
-      original_name = selected_object.Name.split("__plan_")[0]
-      selected_object = doc.getObjectsByLabel(original_name)[0]
-    return selected_object
-
-  return None
 
 def perpendicular(wire, position):
   """
@@ -2120,6 +2156,46 @@ def clean_wire2(wire):
 
   wire = Part.Wire(edges)
   return wire
+
+def join_wires(wires: list[Part.Wire]) -> Part.Wire:
+  return_values = []
+  last_end = None
+  for wire in wires:
+    if isinstance(wire, Part.Edge):
+      wire = Part.Wire(wire)
+    print(last_end, wire)
+
+    if not last_end:
+      last_end = wire
+      continue
+
+    if isinstance(last_end, Part.Wire):
+      distances = [
+        (0, 0, last_end.OrderedVertexes[0].Point.distanceToPoint(wire.OrderedVertexes[0].Point)),
+        (-1, 0, last_end.OrderedVertexes[-1].Point.distanceToPoint(wire.OrderedVertexes[0].Point)),
+        (0, -1, last_end.OrderedVertexes[0].Point.distanceToPoint(wire.OrderedVertexes[-1].Point)),
+        (-1, -1, last_end.OrderedVertexes[-1].Point.distanceToPoint(wire.OrderedVertexes[-1].Point)),
+        ]
+      closest_ends = sorted(distances, key = lambda val: val[2])[0]
+      if closest_ends[0] == 0:
+        last_end.reverse()
+      if closest_ends[1] == -1:
+        wire.reverse()
+      return_values.append(last_end)
+      return_values.append(wire)
+      last_end = wire.OrderedVertexes[-1].Point
+      continue
+
+    if last_end.distanceToPoint(wire.OrderedVertexes[-1].Point) < last_end.distanceToPoint(wire.OrderedVertexes[0].Point):
+      wire.reverse()
+    last_end = wire.OrderedVertexes[-1].Point
+    return_values.append(wire)
+
+  edges = []
+  for wire in return_values:
+    edges += wire.Edges
+
+  return Part.Shape(edges).makeWires("outline")
 
 
 doc = App.ActiveDocument
