@@ -54,6 +54,7 @@ class Hull:
         stern_height = get_dimension(self.doc, "stern_height")
         self.highest = max(prow_height, stern_height)
         section_count = get_dimension(self.doc, "section_count")
+        self.cob_offset = get_dimension(self.doc, "cob_offset")
         highest = deck_height + max(prow_height, stern_height)
         deadrise_radius = sketch_cross_section.Geometry[0].Radius
 
@@ -303,14 +304,21 @@ class Hull:
         App.ActiveDocument.recompute()
 
     def bouancy_report(self):
+        dimensions = self.doc.getObjectsByLabel("dimensions")[0]
+        target_weight = dimensions.get("target_weight").Value
         self.water_angles = create_group(self.doc, "water_angles")
-        target_volume = round(self.hull.Shape.Volume * 1e-6 / 5.8)
+        target_volume = round(self.hull.Shape.Volume * 1e-6 / target_weight)
         for heel_angle in range(0, 36, 5):
             print(f"Drawing waterline at: {target_volume=} and {heel_angle=}.")
             height, wet_hull, water = self.bouancy_boolean_search(heel_angle, target_volume)
             wet_volume = round(wet_hull.Volume * 1e-6)
+            
             center_of_bouancy = wet_hull.CenterOfGravity
+            cob = Part.show(Part.Vertex(center_of_bouancy), f"COB_{heel_angle}")
+            self.water_angles.addObject(cob)
+
             print(f"  {wet_volume=}, {center_of_bouancy.y=}")
+
             wet_hull = Part.show(wet_hull, f"wet_hull_{heel_angle}")
             wet_hull.Visibility = False
             self.water_angles.addObject(wet_hull)

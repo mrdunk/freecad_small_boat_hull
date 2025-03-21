@@ -518,12 +518,14 @@ class Plans:
 class Components:
   stringers = []
   planks = []
+  flat_planks = {}
   keelson = None
   stringers_deep = []
   ribs = {}
   components_flat = {}
   components_bulk = {}
   figurehead = None
+  plank_plans = []
 
   def __init__(self, doc, parent_name: str, body, diagonals: Slice_Diagonals):
     self.doc = doc
@@ -534,7 +536,6 @@ class Components:
     ribs_data = {}
     rib_diagonal_intersections = {}
     self.stringers_group = None
-    self.planks_group = None
     self.plans_planks_group = None
     self.solid_planks_group = None
 
@@ -613,14 +614,9 @@ class Components:
     self.scratch = create_group(self.doc, "scratch_planks")
     self.scratch.Visibility = False
 
-
     self.planks = []
 
-    if self.planks_group is None:
-      self.planks_group = create_group(doc, f"planks")
-      self.group.addObjects([self.planks_group])
-      self.planks_group.Visibility = False
-
+    if self.solid_planks_group is None:
       self.plans_planks_group = create_group(doc, f"plans_planks")
       self.group.addObjects([self.plans_planks_group])
       self.plans_planks_group.Visibility = False
@@ -649,10 +645,10 @@ class Components:
       if last_diagonal_wire is not None:
         print(f"Calculating plank: {plank_count=}, {angle=}, {height=}, {first_plank=}, {last_plank=}")
 
-        top, bottom = self.apply_plank_overlaps(diagonal_wire, last_diagonal_wire, top_overlap=not last_plank, bottom_overlap=not first_plank)
+        top, bottom, overlap = self.apply_plank_overlaps(diagonal_wire, last_diagonal_wire, top_overlap=not last_plank, bottom_overlap=not first_plank)
 
-        self.flat_plank(top, bottom)
-        self.solid_plank(top, bottom)
+        self.flat_plank(plank_count, top, bottom, overlap)
+        self.solid_plank(top, overlap)
 
         first_plank = False
         last_plank = (plank_count == len(diagonals_data) - 3)
@@ -660,36 +656,88 @@ class Components:
 
       last_diagonal_wire = diagonal_wire
 
-  def flat_plank(self, top, bottom):
-    flat_part = FreeCAD.ActiveDocument.addObject('Part::RuledSurface', 'plank_surface')
+  def flat_plank(self, index, top, bottom, overlap):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    plank_thickness = dimensions.get("plank_thickness")
+
     top = Part.show(top, "top_wire")
     bottom = Part.show(bottom, "bottom_wire")
+    overlap = Part.show(overlap, "overlap_wire")
+
+    flat_part = FreeCAD.ActiveDocument.addObject('Part::RuledSurface', 'plank_surface')
     flat_part.Curve1 = (top, [""])
     flat_part.Curve2 = (bottom, [""])
+
+    flat_part_overlap = FreeCAD.ActiveDocument.addObject('Part::RuledSurface', 'plank_surface_overlap')
+    flat_part_overlap.Curve1 = (top, [""])
+    flat_part_overlap.Curve2 = (overlap, [""])
+
     App.ActiveDocument.recompute()
 
     shape = Part.getShape(flat_part, "")
-    flat_mesh = FreeCAD.ActiveDocument.addObject("Mesh::Feature", "plank_mesh")
-    flat_mesh.Mesh = MeshPart.meshFromShape(Shape = shape, LinearDeflection=0.1, AngularDeflection=0.523599, Relative=False)
-    flat_mesh.removeNonManifolds()
+    shape_overlap = Part.getShape(flat_part_overlap, "")
 
-    Gui.Selection.clearSelection()
-    Gui.Selection.addSelection(self.doc.Name, flat_mesh.Name)
-    Gui.runCommand('MeshPart_CreateFlatMesh', 0)
+    mask_bow = Part.makeBox(self.hull.BoundBox.XLength, self.hull.BoundBox.YLength, self.hull.BoundBox.ZLength,
+                            -App.Vector(self.hull.BoundBox.XLength / 2, self.hull.BoundBox.YLength, self.hull.BoundBox.ZMin))
+    bow = shape.common(mask_bow)
+    bow_overlap = shape_overlap.common(mask_bow)
 
-    flat_plank = FreeCAD.ActiveDocument.Objects[-1]
+    mask_stern = Part.makeBox(self.hull.BoundBox.XLength, self.hull.BoundBox.YLength, self.hull.BoundBox.ZLength,
+                            -App.Vector(self.hull.BoundBox.XLength / 2, 0, self.hull.BoundBox.ZMin))
+    stern = shape.common(mask_stern)
+    stern_overlap = shape_overlap.common(mask_stern)
 
-    self.plans_planks_group.addObject(flat_plank)
-    self.planks_group.addObject(flat_mesh)
+    flat_plank_bow = self.flat_plank_part(index, bow, bow_overlap, "plank_bow", plank_thickness)
+    flat_plank_stern = self.flat_plank_part(index, stern, stern_overlap, "plank_stern", plank_thickness)
+
     self.scratch.addObject(top)
     self.scratch.addObject(bottom)
+    self.scratch.addObject(overlap)
     self.scratch.addObject(flat_part)
+    self.scratch.addObject(flat_part_overlap)
 
     top.Visibility = False
     bottom.Visibility = False
+    overlap.Visibility = False
     flat_part.Visibility = False
-    flat_plank.Visibility = False
-    flat_mesh.Visibility = False
+    flat_part_overlap.Visibility = False
+
+  def flat_plank_part(self, index, part, part_overlap, part_name, plank_thickness):
+    #unwrapped = self.unwrap_shape(part, f"{part_name}_nominal")
+    unwrapped_overlap = self.unwrap_shape(part_overlap, f"{part_name}_overlap")
+
+    #self.plans_planks_group.addObject(unwrapped)
+    self.plans_planks_group.addObject(unwrapped_overlap)
+
+    #unwrapped_shape = App.ActiveDocument.getObject(unwrapped.Name)
+    #unwrapped_shape = Part.getShape(unwrapped_shape, "")
+    #unwrapped_shape = Part.makeFace(unwrapped_shape)
+    #unwrapped_solid = unwrapped_shape.extrude(App.Vector(0, 0, 1) * plank_thickness)
+
+    unwrapped_overlap_shape = App.ActiveDocument.getObject(unwrapped_overlap.Name)
+    unwrapped_overlap_shape = Part.getShape(unwrapped_overlap_shape, "")
+    unwrapped_overlap_shape = Part.makeFace(unwrapped_overlap_shape)
+    unwrapped_overlap_solid = unwrapped_overlap_shape.extrude(App.Vector(0, 0, 1) * plank_thickness)
+
+    self.flat_planks[f"{part_name}_{index}"] = unwrapped_overlap_solid
+
+  def unwrap_shape(self, shape, name):
+    feature = FreeCAD.ActiveDocument.addObject("Mesh::Feature", f"{name}_feature")
+    feature.Mesh = MeshPart.meshFromShape(Shape = shape, LinearDeflection=0.1, AngularDeflection=0.523599, Relative=True)
+    feature.removeNonManifolds()
+
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(self.doc.Name, feature.Name)
+    Gui.runCommand('MeshPart_CreateFlatMesh', 0)
+
+    unwrapped = FreeCAD.ActiveDocument.Objects[-1]
+    unwrapped.Label = f"{name}_unrolled"
+
+    self.scratch.addObject(feature)
+    feature.Visibility = False
+    unwrapped.Visibility = False
+
+    return unwrapped
 
   def iterate_plank_edges(self, top, bottom):
     if isinstance(top, Part.Wire):
@@ -762,7 +810,6 @@ class Components:
     self.solid_planks_group.addObjects([additive_loft])
 
     App.ActiveDocument.recompute()
-    #print(additive_loft.Shape.Volume / 1e9)
 
     self.planks.append(additive_loft.Shape)
 
@@ -772,7 +819,7 @@ class Components:
     lap_overlap = dimensions.get(f"lap_overlap")
     rib_thickness = dimensions.get("rib_thickness")
 
-    point_count = int(top_wire.Length / 20)
+    point_count = int(top_wire.Length / 10)
 
     top_wire = Part.Wire(top_wire.copy().Edges)
     bottom_wire = Part.Wire(bottom_wire.copy().Edges)
@@ -819,13 +866,13 @@ class Components:
       # Bottom plank doesn't overlap keel.
       overlap_bottom_wire = overlap_bottom_wire.translate(App.Vector(1, 0, 0) * rib_thickness / 2)
 
-    new_top_wire = new_top_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
-    overlap_bottom_wire = overlap_bottom_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
+    #new_top_wire = new_top_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
+    #overlap_bottom_wire = overlap_bottom_wire.cut(self.stem[0]).cut(self.stern[0]).Wires[0]
 
     #Part.show(new_top_wire, "new_top_wire")
     #Part.show(new_bottom_wire, "new_bottom_wire")
     #Part.show(overlap_bottom_wire, "overlap_bottom_wire")
-    return new_top_wire, overlap_bottom_wire
+    return new_top_wire, new_bottom_wire, overlap_bottom_wire
 
   def draw_stringers(self):
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -1439,8 +1486,8 @@ class Components:
         last = outer_wire.OrderedVertexes[-1].Point
         start = first if first.y < last.y else last
         end = first if first.y > last.y else last
-        y = end.y / math.tan(transom_angle)
-        corner = App.Vector(end.x, end.y + y, -stem_depth)
+        y = math.tan(math.radians(transom_angle)) * (end.z + stem_depth.Value)
+        corner = App.Vector(end.x, end.y - y, -stem_depth)
         end = App.Vector(end.x, end.y, max_z)
         skeg_edges = [
             Part.makeLine(corner, start),
@@ -1460,6 +1507,7 @@ class Components:
         inner_wire,
         Part.makeLine(inner_wire.OrderedVertexes[-1].Point, outer_wire.OrderedVertexes[0].Point),
         ])
+      #Part.show(joined_wire, "joined_wire")
       face = Part.Face(joined_wire)
       if figure_head:
         face = self.add_figgurehead(face, outer_wire, inner_wire)
@@ -1713,8 +1761,20 @@ class Components:
       plank_mirrored_display = Part.show(plank_mirrored, name_starboard)
       self.solid_planks_group.addObject(plank_mirrored_display)
 
-      self.components_flat[name_port] = plank
-      self.components_flat[name_starboard] = plank_mirrored
+    for name, plank in self.flat_planks.items():
+      #plank_nominal, plank_overlap = plank
+      plank_overlap = plank
+
+      #plank_nominal_mirrored = plank_nominal.mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+      plank_overlap_mirrored = plank_overlap.mirror(App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+
+      name_port = f"{name}_port"
+      name_starboard = f"{name}_starboard"
+
+      #self.components_flat[name_port] = (plank_nominal, plank_overlap)
+      #self.components_flat[name_starboard] = (plank_nominal_mirrored, plank_overlap_mirrored)
+      self.components_flat[name_port] = plank_overlap
+      self.components_flat[name_starboard] = plank_overlap_mirrored
 
   @classmethod
   def diagonal_normal_at(cls, diagonal):
@@ -1785,11 +1845,8 @@ class Components:
       deck_part = mask.common(full_deck.copy())
 
       for key, value in self.components_flat.items():
-        #if "rib" in key or "plank" in key or key in ["stem", "stern"]:
         if key.split("_")[0] in ["rib", "stem", "stern"]:
           deck_part = deck_part.cut(value)
-      #for value in self.stringers_deep:
-      #  deck_part = deck_part.cut(value)
 
       deck_part = deck_part.common(self.hull)
       deck_part = self.trim_transom(deck_part)
@@ -1861,6 +1918,7 @@ class Components:
 
 
 class Mass:
+  centers = []
   def __init__(self, doc, components: Components):
     self.doc = doc
     self.components = components
@@ -1921,7 +1979,9 @@ class Layout:
     y_pos_mod = 0
     for label, component in self.components.components_flat.items():
       label = label.replace("-", "M")
-      center = component.CenterOfGravity
+      print(label, type(component))
+      if isinstance(component, Part.Feature):
+        component = component.Shape.copy()
       if "rib" in label:
         direction = App.Vector(1, 0, 0)
         x_pos = component.BoundBox.XLength / 2 + x_pos_offset
@@ -1935,6 +1995,12 @@ class Layout:
         y_pos_mod += component.BoundBox.YLength + 50
         z_pos = -component.BoundBox.XMin
       elif "deck" in label:
+        direction = App.Vector(0, 0, 1)
+        x_pos = x_pos_offset + component.BoundBox.YMax
+        y_pos = y_pos_offset
+        y_pos_mod += component.BoundBox.XLength + 50
+        z_pos = -component.BoundBox.XMin
+      elif "plank_bow" in label or "plank_stern" in label:
         direction = App.Vector(0, 0, 1)
         x_pos = x_pos_offset + component.BoundBox.YMax
         y_pos = y_pos_offset
@@ -1955,8 +2021,7 @@ class Layout:
 
       body = doc.addObject('PartDesign::Body', f"cutout_{label}")
       self.cutouts.addObject(body)
-      feature = App.ActiveDocument.addObject(
-          "Part::Feature", f"cutout_feature_{label}")
+      feature = App.ActiveDocument.addObject("Part::Feature", f"cutout_feature_{label}")
       feature.Label = f"cutout_feature_{label}"
       self.cutouts.addObject(feature)
       feature.Shape = component
@@ -1970,9 +2035,6 @@ class Layout:
 
   def draw_plans(self):
     for label, body in self.bodies.items():
-      if "plank"in label:
-        continue
-
       link = doc.addObject('App::Link', f"link_cutout_{label}")
       link.setLink(body)
       link.Label = f"link_cutout_{label}"
@@ -2163,7 +2225,6 @@ def join_wires(wires: list[Part.Wire]) -> Part.Wire:
   for wire in wires:
     if isinstance(wire, Part.Edge):
       wire = Part.Wire(wire)
-    print(last_end, wire)
 
     if not last_end:
       last_end = wire
