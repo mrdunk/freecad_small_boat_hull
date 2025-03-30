@@ -542,6 +542,7 @@ class Components:
     self.draw_stringers()
     self.draw_gunwale()
 
+    self.draw_rudder()
     self.draw_stem()
     self.draw_stern()
     self.draw_keelson()
@@ -1577,122 +1578,6 @@ class Components:
     face = face.removeSplitter()
     return face
 
-  def draw_stem_stern_bak(self, min_y, max_y, max_z, skeg=False, figure_head=False):
-    profile_keel = doc.getObjectsByLabel('profile_keel')[0]
-    dimensions = doc.getObjectsByLabel("dimensions")[0]
-    stem_depth = dimensions.get("stem_depth")
-    stem_height = dimensions.get("stem_height")
-    rib_thickness = dimensions.get("rib_thickness")
-    hull_type = dimensions.get("hull_type")
-    plank_thickness = dimensions.get("plank_thickness")
-    transom_angle = dimensions.get("transom_angle")
-
-    hull_type = "nope"
-
-    circle_face = None
-    hull_max_z = self.hull.BoundBox.ZMax
-    min_z = 0
-
-    box = Part.makeBox(2, max_y - min_y, hull_max_z, App.Vector(-1, min_y, min_z), App.Vector(0, 0, 1))
-    section = box.common(profile_keel.Shape)
-    section = section.translate(App.Vector(1, 0, 0) * -rib_thickness / 2)
-
-    longest = None
-    for wire in section.Wires:
-      if longest is None or wire.Length > longest.Length:
-        longest = wire
-
-    outline = longest.makeOffset2D(stem_depth, openResult = True)
-    if skeg:
-      first = outline.copy().OrderedVertexes[0].Point
-      last = outline.copy().OrderedVertexes[-1].Point
-      start = first if first.y < last.y else last
-      end = first if first.y > last.y else last
-      y = end.y / math.tan(transom_angle)
-      corner = App.Vector(end.x, end.y + y, -stem_depth)
-      end = App.Vector(end.x, end.y, max_z)
-      skeg_edges = [
-          Part.makeLine(end, corner),
-          Part.makeLine(corner, start)
-          ]
-      outside = Part.Wire(skeg_edges)
-    else:
-      outside = outline.copy()
-
-    inside_center = outline.copy().makeOffset2D(stem_height + stem_depth, openResult = True, fill = False)
-    face = Part.Face(
-        Part.Wire([
-          outside,
-          Part.makeLine(outside.OrderedVertexes[0].Point, inside_center.OrderedVertexes[-1].Point),
-          inside_center,
-          Part.makeLine(outside.OrderedVertexes[-1].Point, inside_center.OrderedVertexes[0].Point),
-          ])
-        )
-    if figure_head:
-      first = inside_center.copy().OrderedVertexes[0]
-      last = inside_center.copy().OrderedVertexes[-1]
-      center = first if first.Z > last.Z else last
-      circle = Part.makeCircle(stem_height + stem_depth, center.Point, App.Vector(-1, 0, 0))
-      circle_face = Part.makeFace([circle])
-      face_tmp = circle_face.cut(face)
-      face_tmp = face_tmp.fuse(face)
-      face = face_tmp
-      face = face.removeSplitter()
-
-    part_3d_center = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
-
-    if hull_type == "plank":
-      inside_sides = outline.copy().makeOffset2D(stem_depth - plank_thickness, openResult = True, fill = False)
-      face = Part.Face(
-          Part.Wire([
-            outside.copy(),
-            Part.makeLine(outside.copy().OrderedVertexes[0].Point, inside_sides.OrderedVertexes[-1].Point),
-            inside_sides,
-            Part.makeLine(outside.copy().OrderedVertexes[-1].Point, inside_sides.OrderedVertexes[0].Point),
-            ])
-          )
-
-      if figure_head:
-        face_tmp = circle_face.cut(face)
-        face_tmp = face_tmp.fuse(face)
-        face = face_tmp
-
-      part_3d = face.extrude(App.Vector(1, 0, 0) * rib_thickness)
-      part_3d = part_3d.removeSplitter()
-
-      part_3d_port = part_3d.copy().translate(App.Vector(1, 0, 0) * rib_thickness)
-      part_3d_starboard = part_3d.copy().translate(App.Vector(1, 0, 0) * -rib_thickness)
-
-    index = 0
-    while True:
-      rib_pos_label = f"rib_positions_{index}"
-      rib_type_label = f"rib_type_{index}"
-      try:
-        rib_position = dimensions.get(rib_pos_label)
-        rib_type = dimensions.get(rib_type_label)
-      except ValueError:
-        break
-
-      index += 1
-
-      if rib_type == "skip":
-        continue
-
-      if rib_position < min_y or rib_position > max_y:
-        continue
-
-      intersect = Part.makeLine(App.Vector(0, rib_position, self.hull.BoundBox.ZMin), App.Vector(0, rib_position, self.hull.BoundBox.ZMax))
-      high_point = intersect.common(part_3d_center).BoundBox.ZMax
-
-      slot = Part.makeBox(rib_thickness * 2, rib_thickness.Value + 0.2, stem_height,
-                          App.Vector(-rib_thickness, rib_position - rib_thickness.Value / 2 - 0.1,
-                                     high_point - stem_height.Value / 2), App.Vector(0, 0, 1))
-      part_3d_center = part_3d_center.cut(slot)
-
-    if hull_type == "plank":
-      return [part_3d_center, part_3d_port, part_3d_starboard]
-    return [part_3d_center]
-
   def draw_keelson(self):
     #profile_keel = doc.getObjectsByLabel('profile_keel')[0]
     dimensions = doc.getObjectsByLabel("dimensions")[0]
@@ -1708,13 +1593,6 @@ class Components:
 
     print("Calculating keelson")
 
-    #box = Part.makeBox(2, keelson_length, prow_height, App.Vector(-1, -keelson_length / 2, 0), App.Vector(0, 0, 1))
-    #section = box.common(profile_keel.Shape)
-    #section = section.translate(App.Vector(1, 0, 0) * -keelson_width / 2)
-
-    #offset = section.extrude(App.Vector(1, 0, 0) * keelson_width)
-    #part_3d = offset.extrude(App.Vector(0, 0, 1) * keelson_depth)
-
     part_3d = Part.makeBox(keelson_width, keelson_length, keelson_depth, App.Vector(-keelson_width / 2, -keelson_length / 2, 0), App.Vector(0, 0, 1))
     part_3d = part_3d.common(self.hull)
 
@@ -1723,6 +1601,112 @@ class Components:
     group_component.addObjects([ Part.show(part_3d) ])
     self.keelson = part_3d
     self.components_bulk["keelson"] = part_3d
+
+  def draw_rudder(self):
+    dimensions = doc.getObjectsByLabel("dimensions")[0]
+    deck_length = dimensions.get("deck_length")
+    stern_height = dimensions.get("stern_height")
+    stem_depth = dimensions.get("stem_depth")
+    transom_angle = dimensions.get("transom_angle")
+    rudder_width = dimensions.get("rudder_width")
+    rib_thickness = dimensions.get("rib_thickness")
+    rudder_post_depth = 15
+    rudder_pintel_thickness = 2
+    extra_blade_space = 0.05 * rudder_width.Value / 2
+
+    print("Calculating rudder")
+
+    root_y = deck_length.Value / 2 + stem_depth.Value + rudder_pintel_thickness
+    root_point = App.Vector(0, root_y, stern_height)
+
+    bottom_inner_y = root_y - math.tan(math.radians(transom_angle)) * (root_point.z + stem_depth.Value)
+    bottom_inner_point = App.Vector(0, bottom_inner_y, -stem_depth)
+
+    top_inner_y = root_y + math.tan(math.radians(transom_angle)) * rudder_post_depth
+    top_inner_point = App.Vector(0, top_inner_y, stern_height.Value + rudder_post_depth)
+
+    top_outer_y = top_inner_y + rudder_post_depth + extra_blade_space
+    top_outer_point = App.Vector(0, top_outer_y, stern_height.Value + rudder_post_depth)
+
+    bottom_outer_y = top_outer_y
+    bottom_outer_point = App.Vector(0, bottom_outer_y, -stem_depth)
+
+    bottom_mid_y = (bottom_inner_y + bottom_outer_y) / 2
+    bottom_mid_point = App.Vector(0, bottom_mid_y, -stem_depth)
+
+    edge_inner = Part.makeLine(top_inner_point, bottom_inner_point)
+    edge_bottom = Part.makeLine(bottom_inner_point, bottom_outer_point)
+    edge_outer = Part.makeLine(bottom_outer_point, top_outer_point)
+    edge_top = Part.makeLine(top_outer_point, top_inner_point)
+
+    outer_case_line = Part.Wire([ edge_inner, edge_bottom, edge_outer, edge_top ])
+
+    rudder_space = rudder_width.Value / 2 + extra_blade_space
+
+    pivot_point = App.Vector(0, bottom_outer_y - rudder_space, rudder_space - stem_depth.Value)
+    pivot = Part.makeCircle(0.5, pivot_point, App.Vector(1, 0, 0))
+    pivot = Part.Wire(pivot.Edges)
+
+    inner_case_blade_slot_bottom = App.Vector(0, pivot_point.y - rudder_space, -stem_depth)
+    inner_case_blade_arc_inner = App.Vector(0, pivot_point.y - rudder_space, pivot_point.z)
+    inner_case_blade_arc_top = App.Vector(0, pivot_point.y, pivot_point.z + rudder_space)
+    outer_case_bottom_outer_point = App.Vector(0, top_outer_y, pivot_point.z + rudder_space)
+
+    inner_case_edge_bottom = Part.makeLine(
+        bottom_inner_point,
+        inner_case_blade_slot_bottom
+        )
+
+    inner_case_edge_inner = Part.makeLine(
+        inner_case_blade_slot_bottom,
+        inner_case_blade_arc_inner
+        )
+
+    inner_case_edge_arc = Part.Arc(
+        inner_case_blade_arc_inner,
+        inner_case_blade_arc_top,
+        App.Vector(0, pivot_point.y + rudder_space, pivot_point.z)
+        ).toShape()
+    inner_case_edge_arc = inner_case_edge_arc.split(math.pi / 2).Edges[0]
+
+    inner_case_edge_arc_to_outer = Part.makeLine(
+        inner_case_blade_arc_top,
+        outer_case_bottom_outer_point
+        )
+
+    inner_case_edge_outer = Part.makeLine(
+        outer_case_bottom_outer_point,
+        top_outer_point
+        )
+
+    inner_case_line = Part.Wire([
+      edge_inner,
+      inner_case_edge_bottom,
+      inner_case_edge_inner,
+      inner_case_edge_arc,
+      inner_case_edge_arc_to_outer,
+      inner_case_edge_outer,
+      edge_top
+      ])
+
+    group = create_group(doc, f"rudder")
+    self.group.addObjects([group])
+
+    self.wire_to_solid("rudder_outer_port", group, outer_case_line.Wires + pivot.Wires, rib_thickness, App.Vector(1, 0, 0), App.Vector(1, 0, 0) * rib_thickness)
+    self.wire_to_solid("rudder_outer_starboard", group, outer_case_line.Wires + pivot.Wires, rib_thickness, App.Vector(1, 0, 0), App.Vector(1, 0, 0) * -rib_thickness)
+    self.wire_to_solid("rudder_inner", group, inner_case_line.Wires, rib_thickness, App.Vector(1, 0, 0))
+
+  def wire_to_solid(self, name, group, wires, thickness, direction, translate=App.Vector(0, 0, 0)):
+    for wire in wires[:1]:
+      wire.reverse()
+    face = Part.Face(wires)
+    face.translate(translate)
+    part = face.extrude(direction * thickness)
+    part.translate(direction * -thickness / 2)
+
+    solid = Part.show(part, name)
+    group.addObjects([ solid ])
+    self.components_flat[name] = part
 
   def mirror_sides(self):
     for rib_position, rib in self.ribs.items():
@@ -2018,6 +2002,12 @@ class Layout:
         y_pos = y_pos_offset
         y_pos_mod += component.BoundBox.ZLength + 50
         z_pos = -component.BoundBox.YMin
+      elif "rudder" in label:
+        direction = App.Vector(0, 1, 0)
+        x_pos = x_pos_offset
+        y_pos = -component.BoundBox.YMax + y_pos_offset
+        y_pos_mod += component.BoundBox.YLength + 50
+        z_pos = -component.BoundBox.XMin
 
       body = doc.addObject('PartDesign::Body', f"cutout_{label}")
       self.cutouts.addObject(body)
